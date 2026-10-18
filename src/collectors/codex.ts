@@ -18,7 +18,7 @@ function walkJsonlFiles(dir: string, acc: string[] = []): string[] {
 }
 
 /**
- * Collect and deterministically compress OpenAI Codex CLI sessions (`~/.codex/sessions/**`) for a given repository path.
+ * Collect and deterministically compress OpenAI Codex CLI sessions (`~/.codex/sessions/`) for a given repository path.
  */
 export function collectCodexSessions(
   repoRoot: string,

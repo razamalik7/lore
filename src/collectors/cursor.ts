@@ -18,7 +18,7 @@ function getCursorWorkspaceStorageDir(): string {
 
 /**
  * Collect and deterministically compress Cursor AI composer/chat sessions for a given repository path.
- * Supports both `~/.cursor/projects/<slug>/agent-transcripts` and Cursor's `workspaceStorage/*/state.vscdb`.
+ * Supports both `~/.cursor/projects/<slug>/agent-transcripts` and Cursor's `workspaceStorage/<hash>/state.vscdb`.
  */
 export function collectCursorSessions(
   repoRoot: string,
