@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 430" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <style>
+      .win { fill: url(#bgGrad); stroke: #30363d; stroke-width: 1.5; rx: 10; }
+      .bar { fill: #161b22; rx: 10; }
+      .div { stroke: #30363d; stroke-width: 1; }
+      .title { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; fill: #8b949e; font-weight: 600; }
+      .code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12.5px; }
+      .prompt { fill: #58a6ff; font-weight: bold; }
+      .cmd { fill: #f0f6fc; font-weight: 600; }
+      .ok { fill: #3fb950; font-weight: 600; }
+      .dim { fill: #8b949e; }
+      .hl { fill: #d2a8ff; }
+      .warn { fill: #e3b341; }
+      .agent { fill: #79c0ff; }
+      .badge { fill: #238636; rx: 4; }
+      .badge-txt { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 11px; fill: #ffffff; font-weight: 600; }
+
+      @keyframes fade1 { 0%, 5% { opacity: 0; } 10%, 100% { opacity: 1; } }
+      @keyframes fade2 { 0%, 18% { opacity: 0; } 24%, 100% { opacity: 1; } }
+      @keyframes fade3 { 0%, 35% { opacity: 0; } 42%, 100% { opacity: 1; } }
+      @keyframes fade4 { 0%, 52% { opacity: 0; } 58%, 100% { opacity: 1; } }
+      @keyframes fade5 { 0%, 68% { opacity: 0; } 75%, 100% { opacity: 1; } }
+      @keyframes fade6 { 0%, 82% { opacity: 0; } 88%, 100% { opacity: 1; } }
+
+      .s1 { animation: fade1 12s infinite; }
+      .s2 { animation: fade2 12s infinite; }
+      .s3 { animation: fade3 12s infinite; }
+      .s4 { animation: fade4 12s infinite; }
+      .s5 { animation: fade5 12s infinite; }
+      .s6 { animation: fade6 12s infinite; }
+    </style>
+  </defs>
+
+  <!-- Main Window -->
+  <rect class="win" x="2" y="2" width="876" height="426" rx="10"/>
+  <line class="div" x1="2" y1="38" x2="878" y2="38"/>
+  <line class="div" x1="440" y1="38" x2="440" y2="428"/>
+
+  <!-- Traffic Lights -->
+  <circle cx="22" cy="20" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="20" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="20" r="6" fill="#27c93f"/>
+
+  <text class="title" x="155" y="24">🖥️  Device A — Desktop (Antigravity / Claude Code)</text>
+  <text class="title" x="590" y="24">💻  Device B — Laptop (Zero Manual Handoff)</text>
+
+  <!-- LEFT PANE: DESKTOP -->
+  <g class="code s1" transform="translate(20, 68)">
+    <text><tspan class="prompt">~/app (main) $ </tspan><tspan class="cmd">git lore init</tspan></text>
+    <text y="22" class="ok">✔ Initialized lore in ~/app</text>
+    <text y="42" class="dim">  • Hidden Git Ref  : refs/ai/lore (SSH X25519 + AES-256-GCM)</text>
+    <text y="60" class="dim">  • Hooks Installed : pre-push, post-merge</text>
+  </g>
+
+  <g class="code s2" transform="translate(20, 156)">
+    <text><tspan class="prompt">~/app (main) $ </tspan><tspan class="cmd">git lore allow torvalds</tspan></text>
+    <text y="22" class="ok">✔ Authorized @torvalds via github.com/torvalds.keys</text>
+    <text y="42" class="dim">  • Key: SHA256:6GOhswrs59K6OP7eO8wUxqPYBsI4...</text>
+  </g>
+
+  <g class="code s3" transform="translate(20, 230)">
+    <text><tspan class="prompt">~/app (main) $ </tspan><tspan class="cmd">git push origin main</tspan></text>
+    <text y="22" class="dim">[pre-push] Stripped 215.0 KB raw chat → 24.1 KB (89% bloat removed)</text>
+    <text y="42" class="dim">[pre-push] Scrubbed secrets &amp; encrypted for 2 SSH keys</text>
+    <text y="62" class="ok">✔ Synced lore → origin refs/ai/lore (0 LLM API calls)</text>
+    <text y="82" class="dim">To github.com:you/app.git  main -&gt; main</text>
+  </g>
+
+  <g class="s3" transform="translate(20, 345)">
+    <rect x="0" y="0" width="398" height="58" rx="6" fill="#111820" stroke="#238636" stroke-width="1"/>
+    <text class="code ok" x="14" y="23">git status &amp; git log stay 100% clean</text>
+    <text class="code dim" x="14" y="43">Public cloners without authorized SSH key = Access Denied</text>
+  </g>
+
+  <!-- RIGHT PANE: LAPTOP -->
+  <g class="code s4" transform="translate(460, 68)">
+    <text><tspan class="prompt">~/app (main) $ </tspan><tspan class="cmd">git pull</tspan></text>
+    <text y="22" class="dim">Already up to date.</text>
+    <text y="42" class="ok">✔ [post-merge] Decrypted refs/ai/lore via ~/.ssh/id_ed25519</text>
+    <text y="60" class="dim">  • Living Digest : ~310 tokens (.agents/rules/lore-context.md)</text>
+    <text y="78" class="dim">  • Deep Recall   : Indexed in SQLite FTS5 (0 tokens until queried)</text>
+  </g>
+
+  <g class="code s5" transform="translate(460, 178)">
+    <text><tspan class="hl">▶ You (New Chat on Laptop):</tspan></text>
+    <text y="22" class="cmd">"Continue fixing the JWT refresh race condition"</text>
+  </g>
+
+  <g class="code s6" transform="translate(460, 232)">
+    <text><tspan class="agent">◀ AI Agent (Antigravity / Claude / Cursor):</tspan></text>
+    <text y="22" class="dim">[Auto-loaded ~310-token Living Digest + MCP lore_search]</text>
+    <text y="46" class="cmd">"Picking up from your desktop session (e3c262fd):</text>
+    <text y="66" class="cmd"> We added the single-flight refreshPromise mutex in</text>
+    <text y="86" class="cmd"> src/auth.ts. Next step is wiring the retry interceptor</text>
+    <text y="106" class="cmd"> in src/middleware.ts—applying that now..."</text>
+  </g>
+
+  <g class="s6" transform="translate(460, 360)">
+    <rect class="badge" x="0" y="0" width="395" height="32"/>
+    <text class="badge-txt" x="18" y="20">⚡ 99.7% Context Window Saved  ·  0 API Keys  ·  E2E Encrypted</text>
+  </g>
+</svg>

@@ -1,12 +1,20 @@
 # `lore` (`git-lore`)
 
+[![npm version](https://img.shields.io/npm/v/git-lore-cli.svg?color=238636)](https://www.npmjs.com/package/git-lore-cli)
+[![CI](https://github.com/razamalik7/lore/actions/workflows/publish.yml/badge.svg)](https://github.com/razamalik7/lore/actions/workflows/publish.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 **Git-native, encrypted, zero-token-bloat AI context & transcript sync across devices and contributors.**
 
 Switch between your desktop and laptop—or hand off a branch to a teammate—and your AI coding agent (**Antigravity, Claude Code, Cursor, Codex**) immediately knows your past chats, architectural decisions, and debugging context without you ever explaining a thing.
 
+<p align="center">
+  <img src="./assets/demo.svg" alt="lore side-by-side terminal demo" width="100%" />
+</p>
+
 - **0 Cloud Accounts / 0 API Keys**: Uses Git itself (`refs/ai/lore`) as the database and deterministic local compression.
 - **~350-Token Always-On Digest + 0-Token Deep Search**: Strips 85–95% of raw `.jsonl` bloat and indexes full transcripts locally via SQLite FTS5 + MCP.
-- **Private Context on Public Repos**: Encrypted with your existing `~/.ssh/id_ed25519` key and `https://github.com/<username>.keys` via **Ed25519 → X25519 ECDH + AES-256-GCM**.
+- **Private Context on Public Repos**: Encrypted with your existing `~/.ssh/id_ed25519` key and `https://github.com/<username>.keys` via **Ed25519 → X25519 ECDH + AES-256-GCM** (with automatic API key/token redaction before encryption).
 - **Zero Git Pollution**: Never touches your working tree, never clutters `git log`, and keeps `git status` 100% clean.
 
 ---

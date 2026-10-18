@@ -345,7 +345,15 @@ export function commitToGitRef(repoRoot: string): {
   if (parentSha) {
     commitArgs.push('-p', parentSha);
   }
-  const commitSha = runGit(repoRoot, commitArgs);
+  const gitUserName = tryGit(repoRoot, ['config', 'user.name']) || os.userInfo().username || 'lore';
+  const gitUserEmail = tryGit(repoRoot, ['config', 'user.email']) || `${gitUserName}@localhost`;
+  const commitEnv = {
+    GIT_AUTHOR_NAME: gitUserName,
+    GIT_AUTHOR_EMAIL: gitUserEmail,
+    GIT_COMMITTER_NAME: gitUserName,
+    GIT_COMMITTER_EMAIL: gitUserEmail,
+  };
+  const commitSha = runGit(repoRoot, commitArgs, commitEnv);
   runGit(repoRoot, ['update-ref', LORE_REF, commitSha]);
 
   return {
