@@ -8,7 +8,7 @@ export interface CompactTurn {
 
 export interface SessionRecord {
   id: string;
-  source: 'antigravity' | 'claude-code' | 'manual';
+  source: 'antigravity' | 'claude-code' | 'cursor' | 'codex' | 'manual';
   title: string;
   createdAt: string;
   updatedAt: string;
@@ -44,7 +44,7 @@ export interface RecipientEntry {
 export interface SessionIndexMeta {
   id: string;
   title: string;
-  source: 'antigravity' | 'claude-code' | 'manual';
+  source: 'antigravity' | 'claude-code' | 'cursor' | 'codex' | 'manual';
   updatedAt: string;
   createdAt: string;
   branch?: string;

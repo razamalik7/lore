@@ -94,6 +94,29 @@ description: >-
     }
   }
 
+  // 4. Cursor Global MCP Config (~/.cursor/mcp.json) if ~/.cursor exists
+  const cursorDir = path.join(home, '.cursor');
+  if (fs.existsSync(cursorDir)) {
+    try {
+      const cursorMcpPath = path.join(cursorDir, 'mcp.json');
+      let cursorMcp: Record<string, any> = { mcpServers: {} };
+      if (fs.existsSync(cursorMcpPath)) {
+        const raw = fs.readFileSync(cursorMcpPath, 'utf8').trim();
+        if (raw) cursorMcp = JSON.parse(raw);
+      }
+      if (!cursorMcp.mcpServers || typeof cursorMcp.mcpServers !== 'object') {
+        cursorMcp.mcpServers = {};
+      }
+      cursorMcp.mcpServers.lore = {
+        command: 'node',
+        args: [normalizedCli, 'mcp'],
+      };
+      fs.writeFileSync(cursorMcpPath, JSON.stringify(cursorMcp, null, 2), 'utf8');
+    } catch {
+      // Ignore
+    }
+  }
+
   return {
     antigravityMcpPath: agyMcpPath,
     antigravitySkillPath: skillPath,

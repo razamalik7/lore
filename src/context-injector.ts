@@ -211,6 +211,7 @@ export function refreshWorkspaceContextFiles(repoRoot: string): {
 } {
   const paths = ensureLocalLoreDirs(repoRoot);
   ensureGitExclude(paths.gitDir, '.agents/rules/lore-context.md');
+  ensureGitExclude(paths.gitDir, '.cursor/rules/lore-context.mdc');
   rebuildSearchIndex(repoRoot);
 
   const markdown = renderDigestMarkdown(repoRoot);
@@ -218,6 +219,14 @@ export function refreshWorkspaceContextFiles(repoRoot: string): {
   fs.mkdirSync(rulesDir, { recursive: true });
   const ruleFilePath = path.join(rulesDir, 'lore-context.md');
   fs.writeFileSync(ruleFilePath, markdown, 'utf8');
+
+  // If repo uses Cursor (.cursor/), also write .cursor/rules/lore-context.mdc
+  if (fs.existsSync(path.join(repoRoot, '.cursor'))) {
+    const cursorRulesDir = path.join(repoRoot, '.cursor', 'rules');
+    fs.mkdirSync(cursorRulesDir, { recursive: true });
+    const mdcContent = `---\ndescription: lore shared cross-device AI context\nalwaysApply: true\n---\n\n${markdown}`;
+    fs.writeFileSync(path.join(cursorRulesDir, 'lore-context.mdc'), mdcContent, 'utf8');
+  }
 
   const tokenEstimate = Math.ceil(markdown.length / 4);
   return { ruleFilePath, tokenEstimate };

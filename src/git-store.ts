@@ -17,6 +17,8 @@ import {
 } from './crypto.js';
 import { collectAntigravitySessions } from './collectors/antigravity.js';
 import { collectClaudeCodeSessions } from './collectors/claude.js';
+import { collectCursorSessions } from './collectors/cursor.js';
+import { collectCodexSessions } from './collectors/codex.js';
 
 export const LORE_REF = 'refs/ai/lore';
 export const LORE_REMOTE_REF = 'refs/remotes/origin/ai-lore';
@@ -183,7 +185,9 @@ export function collectAndCacheLocalSessions(repoRoot: string): {
   const meta = getGitMeta(repoRoot);
   const agy = collectAntigravitySessions(repoRoot, meta);
   const claude = collectClaudeCodeSessions(repoRoot, meta);
-  const allNew = [...agy, ...claude];
+  const cursor = collectCursorSessions(repoRoot, meta);
+  const codex = collectCodexSessions(repoRoot, meta);
+  const allNew = [...agy, ...claude, ...cursor, ...codex];
 
   let bytesSaved = 0;
   for (const s of allNew) {

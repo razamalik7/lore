@@ -1,16 +1,32 @@
 {
-  "name": "lore",
+  "name": "git-lore",
   "version": "0.1.0",
-  "description": "Git-native, zero-token-bloat encrypted AI context & transcript sync across devices and contributors",
+  "description": "Git-native, encrypted, zero-token-bloat AI context & transcript sync across devices and contributors (Antigravity, Claude Code, Cursor, Codex)",
   "type": "module",
   "bin": {
     "lore": "./dist/cli.js",
     "git-lore": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
-    "test": "tsx test/e2e.test.ts"
+    "test": "tsx test/e2e.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/razamalik7/lore.git"
+  },
+  "homepage": "https://github.com/razamalik7/lore#readme",
+  "bugs": {
+    "url": "https://github.com/razamalik7/lore/issues"
+  },
+  "engines": {
+    "node": ">=22.5.0"
   },
   "keywords": [
     "git",
@@ -19,10 +35,13 @@
     "mcp",
     "antigravity",
     "claude-code",
+    "cursor",
+    "codex",
     "memory",
-    "lore"
+    "lore",
+    "git-lore"
   ],
-  "author": "",
+  "author": "razamalik7",
   "license": "MIT",
   "dependencies": {
     "@noble/curves": "^1.8.1"
