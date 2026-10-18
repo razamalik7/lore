@@ -15,7 +15,7 @@ Switch between your desktop and laptop—or hand off a branch to a teammate—an
 
 ```bash
 # 1. One-time machine setup (registers global MCP server & skill for Antigravity, Claude Code, Cursor)
-npx git-lore setup
+npx git-lore-cli setup
 
 # 2. Initialize in any Git repository
 git lore init

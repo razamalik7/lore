@@ -1,11 +1,11 @@
 {
-  "name": "git-lore",
+  "name": "git-lore-cli",
   "version": "0.1.0",
   "description": "Git-native, encrypted, zero-token-bloat AI context & transcript sync across devices and contributors (Antigravity, Claude Code, Cursor, Codex)",
   "type": "module",
   "bin": {
-    "lore": "./dist/cli.js",
-    "git-lore": "./dist/cli.js"
+    "lore": "dist/cli.js",
+    "git-lore": "dist/cli.js"
   },
   "files": [
     "dist",
