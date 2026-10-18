@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-18T23:02:48.208Z",
+  "encryption": "ssh-x25519-aes256gcm",
+  "recipients": [
+    {
+      "label": "local:nars7@Polar",
+      "sshPublicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILpn12jYe2XF39rW9JaIbiv+ZSBmS2DLcxFeyQG2RmiJ nars7@Polar",
+      "fingerprint": "SHA256:6GOhswrs59K6OP7eO8wUxqPYBsI4FYqJyjbhpzHFclc",
+      "addedAt": "2026-10-18T23:02:48.184Z"
+    }
+  ]
+}
