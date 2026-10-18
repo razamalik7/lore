@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import type { CompactTurn, SessionRecord } from '../types.js';
-import { buildAutoRecap, isSameOrSubPath, normalizeFsPath } from './antigravity.js';
+import { buildAutoRecap, isSameOrSubPath, matchesRepoSlug } from './antigravity.js';
 
 function getCursorWorkspaceStorageDir(): string {
   const home = os.homedir();
@@ -30,11 +30,10 @@ export function collectCursorSessions(
   // 1. Check ~/.cursor/projects/<slug>/agent-transcripts/*.jsonl or *.json
   const cursorProjectsDir = path.join(os.homedir(), '.cursor', 'projects');
   if (fs.existsSync(cursorProjectsDir)) {
-    const encodedRepoSlug = repoRoot.replace(/[:\\/ ]+/g, '-').toLowerCase();
     try {
       for (const dir of fs.readdirSync(cursorProjectsDir, { withFileTypes: true })) {
         if (!dir.isDirectory()) continue;
-        if (!dir.name.toLowerCase().startsWith(encodedRepoSlug)) continue;
+        if (!matchesRepoSlug(dir.name, repoRoot)) continue;
         const transcriptsDir = path.join(cursorProjectsDir, dir.name, 'agent-transcripts');
         if (!fs.existsSync(transcriptsDir)) continue;
 

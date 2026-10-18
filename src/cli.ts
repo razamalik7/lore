@@ -16,6 +16,7 @@ import {
   getGitMeta,
   importFromGitRef,
   LORE_REF,
+  LORE_REMOTE_REF,
   loadAllLocalSessions,
   loadManifest,
   loadTakeaways,
@@ -40,6 +41,20 @@ function formatKB(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function withProgress<T>(message: string, fn: () => T): T {
+  const isTTY = Boolean(process.stderr.isTTY);
+  if (isTTY) {
+    process.stderr.write(`\r⟳ ${message}...`);
+  }
+  try {
+    return fn();
+  } finally {
+    if (isTTY) {
+      process.stderr.write(`\r\x1b[K`);
+    }
+  }
 }
 
 function requireRepoRoot(): string {
@@ -134,10 +149,16 @@ async function main(): Promise<void> {
     }
 
     const hooks = installGitHooks(repoRoot, __filename);
-    const pullRes = pullLoreFromRemote(repoRoot);
-    const collectRes = collectAndCacheLocalSessions(repoRoot);
-    const commitRes = commitToGitRef(repoRoot);
-    const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+    const { pullRes, collectRes, commitRes, ruleRes } = withProgress(
+      'Collecting & encrypting local AI sessions',
+      () => {
+        const pullRes = pullLoreFromRemote(repoRoot);
+        const collectRes = collectAndCacheLocalSessions(repoRoot);
+        const commitRes = commitToGitRef(repoRoot);
+        const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+        return { pullRes, collectRes, commitRes, ruleRes };
+      }
+    );
 
     console.log(`✔ Initialized lore in ${repoRoot}`);
     console.log(`  • Hidden Git Ref     : ${LORE_REF} (${commitRes.commitSha.slice(0, 8)})`);
@@ -156,8 +177,11 @@ async function main(): Promise<void> {
 
   if (cmd === 'sync' || cmd === 'push') {
     const repoRoot = requireRepoRoot();
-    const res = pushLoreToRemote(repoRoot);
-    const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+    const { res, ruleRes } = withProgress('Syncing & encrypting AI sessions', () => {
+      const res = pushLoreToRemote(repoRoot);
+      const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+      return { res, ruleRes };
+    });
     console.log(`✔ Synced lore → ${LORE_REF} (${res.commitSha.slice(0, 8)})`);
     console.log(`  • Sessions           : ${res.sessionCount}`);
     console.log(`  • Takeaways          : ${res.takeawayCount}`);
@@ -168,10 +192,13 @@ async function main(): Promise<void> {
 
   if (cmd === 'pull') {
     const repoRoot = requireRepoRoot();
-    const pullRes = pullLoreFromRemote(repoRoot);
-    importFromGitRef(repoRoot);
-    const collectRes = collectAndCacheLocalSessions(repoRoot);
-    const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+    const { pullRes, collectRes, ruleRes } = withProgress('Pulling & decrypting lore context', () => {
+      const pullRes = pullLoreFromRemote(repoRoot);
+      importFromGitRef(repoRoot);
+      const collectRes = collectAndCacheLocalSessions(repoRoot);
+      const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+      return { pullRes, collectRes, ruleRes };
+    });
     if (pullRes.decryptionError) {
       console.error(`✖ Decryption error: ${pullRes.decryptionError}`);
       process.exit(1);
@@ -295,9 +322,11 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const repoRoot = requireRepoRoot();
-    collectAndCacheLocalSessions(repoRoot);
-    refreshWorkspaceContextFiles(repoRoot);
-    const hits = searchLore(repoRoot, query, 10);
+    const hits = withProgress('Indexing & searching lore history', () => {
+      collectAndCacheLocalSessions(repoRoot);
+      refreshWorkspaceContextFiles(repoRoot);
+      return searchLore(repoRoot, query, 10);
+    });
     if (hits.length === 0) {
       console.log(`No matches found for "${query}".`);
       return;
@@ -349,13 +378,21 @@ async function main(): Promise<void> {
 
   if (cmd === 'status') {
     const repoRoot = requireRepoRoot();
-    importFromGitRef(repoRoot);
-    collectAndCacheLocalSessions(repoRoot);
-    const ruleRes = refreshWorkspaceContextFiles(repoRoot);
-    const manifest = loadManifest(repoRoot);
-    const sessions = loadAllLocalSessions(repoRoot);
-    const takeaways = loadTakeaways(repoRoot);
-    const refSha = tryGit(repoRoot, ['rev-parse', '--short', LORE_REF]) || 'uncommitted';
+    const { ruleRes, manifest, sessions, takeaways, refSha, remoteRefSha, hasOrigin } = withProgress(
+      'Scanning local AI sessions & project memory',
+      () => {
+        importFromGitRef(repoRoot);
+        collectAndCacheLocalSessions(repoRoot);
+        const ruleRes = refreshWorkspaceContextFiles(repoRoot);
+        const manifest = loadManifest(repoRoot);
+        const sessions = loadAllLocalSessions(repoRoot);
+        const takeaways = loadTakeaways(repoRoot);
+        const refSha = tryGit(repoRoot, ['rev-parse', '--short', LORE_REF]) || 'uncommitted';
+        const remoteRefSha = tryGit(repoRoot, ['rev-parse', '--short', LORE_REMOTE_REF]);
+        const hasOrigin = Boolean(tryGit(repoRoot, ['remote', 'get-url', 'origin']));
+        return { ruleRes, manifest, sessions, takeaways, refSha, remoteRefSha, hasOrigin };
+      }
+    );
 
     const totalRaw = sessions.reduce((acc, s) => acc + s.originalBytes, 0);
     const totalStripped = sessions.reduce((acc, s) => acc + s.compressedBytes, 0);
@@ -380,6 +417,10 @@ async function main(): Promise<void> {
           `  [${s.id.slice(0, 8)}] ${s.title} (${s.source} · ${s.deviceHostname || 'local'} · ${s.turns.length} turns · ${formatKB(s.originalBytes)}→${formatKB(s.compressedBytes)})`
         );
       }
+    }
+
+    if (refSha === 'uncommitted' || (hasOrigin && remoteRefSha !== refSha)) {
+      console.log(`\n  💡 Tip: run 'lore sync' to push encrypted context to origin`);
     }
     return;
   }

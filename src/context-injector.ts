@@ -53,10 +53,15 @@ export function rebuildSearchIndex(repoRoot: string): void {
   );
 
   for (const t of takeaways) {
+    const firstLine = t.content.split(/\r?\n/)[0].trim();
+    const titleLabel =
+      firstLine.length > 80
+        ? `[${t.category.toUpperCase()}] ${firstLine.slice(0, 80)}…`
+        : `[${t.category.toUpperCase()}] ${firstLine}`;
     insert.run(
       'takeaway',
       t.id,
-      `[${t.category.toUpperCase()}]`,
+      titleLabel,
       t.author || '',
       '',
       t.timestamp,
@@ -156,8 +161,8 @@ export function renderDigestMarkdown(
     '# Project Lore (`lore` Shared AI Context)',
     '',
     '> Auto-synced across devices & approved contributors via encrypted `refs/ai/lore`.',
-    '> Need full verbatim dialogue or older chats? Call MCP tools `lore_get_session(id)` or `lore_search(query)`.',
-    '> Finished a milestone or architectural decision? Call `lore_save_takeaway(category, content)`.',
+    '> Need full verbatim dialogue or older chats? Run `lore search "<query>"` / `lore show <id>` or call MCP tools `lore_search` / `lore_get_session`.',
+    '> Finished a milestone or architectural decision? Run `lore note "<text>" --cat <type>` or call `lore_save_takeaway`.',
     '',
   ];
 
@@ -166,7 +171,9 @@ export function renderDigestMarkdown(
     const recentTakeaways = allTakeaways.slice(-15);
     for (const t of recentTakeaways) {
       const dateStr = t.timestamp.slice(0, 10);
-      lines.push(`- **[${t.category.toUpperCase()}]** ${t.content} _(${t.author}, ${dateStr})_`);
+      const firstLine = t.content.split(/\r?\n/)[0].trim();
+      const summary = firstLine.length > 280 ? `${firstLine.slice(0, 280)}…` : firstLine;
+      lines.push(`- **[${t.category.toUpperCase()}]** ${summary} _(${t.author}, ${dateStr})_`);
     }
     lines.push('');
   }

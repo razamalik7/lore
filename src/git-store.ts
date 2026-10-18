@@ -17,7 +17,7 @@ import {
   getAllLocalIdentities,
 } from './crypto.js';
 import { collectAntigravitySessions } from './collectors/antigravity.js';
-import { collectClaudeCodeSessions } from './collectors/claude.js';
+import { collectClaudeCodeSessions, collectClaudeMemoryTakeaways } from './collectors/claude.js';
 import { collectCursorSessions } from './collectors/cursor.js';
 import { collectCodexSessions } from './collectors/codex.js';
 import { redactSecrets } from './redactor.js';
@@ -218,6 +218,17 @@ export function collectAndCacheLocalSessions(repoRoot: string): {
     saveLocalSession(repoRoot, s);
     bytesSaved += Math.max(0, s.originalBytes - s.compressedBytes);
   }
+
+  try {
+    const claudeMemories = collectClaudeMemoryTakeaways(repoRoot, meta);
+    if (claudeMemories.length > 0) {
+      const existingTakeaways = loadTakeaways(repoRoot);
+      saveTakeaways(repoRoot, [...existingTakeaways, ...claudeMemories]);
+    }
+  } catch {
+    // Ignore memory collection errors
+  }
+
   const totalSessions = loadAllLocalSessions(repoRoot).length;
   return { collected: allNew.length, totalSessions, bytesSaved };
 }

@@ -178,12 +178,73 @@ export function detectGithubOwnerRepo(repoRoot = process.cwd()): string | null {
   }
 }
 
-function getRepoVaultKey(ownerRepo: string): string | null {
+function getGitCredentialGithubToken(): string | null {
   try {
-    const out = execFileSync('gh', ['api', `repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`], {
+    const out = execFileSync('git', ['credential', 'fill'], {
+      input: 'protocol=https\nhost=github.com\n\n',
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const m = out.match(/^password=(.+)$/m);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function ghApi(endpoint: string, method: 'GET' | 'POST' | 'PATCH' = 'GET', bodyObj?: Record<string, any>): string {
+  // 1. Try gh CLI first if installed
+  try {
+    const args = ['api', endpoint];
+    if (method !== 'GET') args.push('-X', method);
+    let input: string | undefined;
+    if (bodyObj) {
+      args.push('--input', '-');
+      input = JSON.stringify(bodyObj);
+    }
+    return execFileSync('gh', args, {
+      input,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
+  } catch {
+    // 2. Fallback to git credential fill + curl (works on Windows/macOS/Linux without gh CLI installed)
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || getGitCredentialGithubToken();
+    if (!token) {
+      throw new Error('No GitHub token available via gh CLI or git credential fill');
+    }
+    const cleanEndpoint = endpoint.replace(/^\/+/, '');
+    const url = `https://api.github.com/${cleanEndpoint}`;
+    const curlBin = process.platform === 'win32' ? 'curl.exe' : 'curl';
+    const curlArgs = [
+      '-sS',
+      '-f',
+      '-X',
+      method,
+      '-H',
+      `Authorization: Bearer ${token}`,
+      '-H',
+      'Accept: application/vnd.github+json',
+      '-H',
+      'User-Agent: git-lore-cli',
+    ];
+    let input: string | undefined;
+    if (bodyObj) {
+      curlArgs.push('-H', 'Content-Type: application/json', '--data-binary', '@-');
+      input = JSON.stringify(bodyObj);
+    }
+    curlArgs.push(url);
+    return execFileSync(curlBin, curlArgs, {
+      input,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  }
+}
+
+function getRepoVaultKey(ownerRepo: string): string | null {
+  try {
+    const out = ghApi(`repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`, 'GET');
     const parsed = JSON.parse(out) as { value?: string };
     return parsed.value || null;
   } catch {
@@ -195,17 +256,15 @@ function setRepoVaultKey(ownerRepo: string, vaultKeyB64: string): boolean {
   try {
     const existing = getRepoVaultKey(ownerRepo);
     if (existing) {
-      execFileSync(
-        'gh',
-        ['api', `repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`, '-X', 'PATCH', '-f', `name=${VAULT_VAR_NAME}`, '-f', `value=${vaultKeyB64}`],
-        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-      );
+      ghApi(`repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`, 'PATCH', {
+        name: VAULT_VAR_NAME,
+        value: vaultKeyB64,
+      });
     } else {
-      execFileSync(
-        'gh',
-        ['api', `repos/${ownerRepo}/actions/variables`, '-X', 'POST', '-f', `name=${VAULT_VAR_NAME}`, '-f', `value=${vaultKeyB64}`],
-        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
-      );
+      ghApi(`repos/${ownerRepo}/actions/variables`, 'POST', {
+        name: VAULT_VAR_NAME,
+        value: vaultKeyB64,
+      });
     }
     return true;
   } catch {
@@ -228,11 +287,8 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
   const accountPubPath = `${accountPrivPath}.pub`;
 
   try {
-    // 1. Verify `gh` is authenticated and fetch user's GitHub login, id, node_id
-    const userJson = execFileSync('gh', ['api', 'user'], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    // 1. Verify GitHub authentication (via `gh` CLI or `git credential fill`) and fetch user's GitHub login, id, node_id
+    const userJson = ghApi('user', 'GET');
     const user = JSON.parse(userJson) as { login: string; id: number; node_id: string };
     if (!user.login || !user.id || !user.node_id) return null;
 
@@ -240,10 +296,7 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
     const currentOwnerRepo = detectGithubOwnerRepo(repoRoot);
 
     // 2. Query authenticated user's gists for existing lore envelope
-    const gistsJson = execFileSync('gh', ['api', 'gists?per_page=100'], {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    const gistsJson = ghApi('gists?per_page=100', 'GET');
     const gists = JSON.parse(gistsJson) as Array<{
       id: string;
       public: boolean;
@@ -256,10 +309,7 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
     );
 
     if (existingGist) {
-      const detailJson = execFileSync('gh', ['api', `gists/${existingGist.id}`], {
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+      const detailJson = ghApi(`gists/${existingGist.id}`, 'GET');
       const detail = JSON.parse(detailJson);
       const rawContent = detail?.files?.[GIST_FILENAME]?.content;
       if (rawContent) {
@@ -362,10 +412,7 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
     let targetVaultRepo = currentOwnerRepo;
     if (!targetVaultRepo) {
       try {
-        const reposJson = execFileSync('gh', ['api', 'user/repos?affiliation=owner&per_page=1&sort=pushed'], {
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }).trim();
+        const reposJson = ghApi('user/repos?affiliation=owner&per_page=1&sort=pushed', 'GET');
         const repos = JSON.parse(reposJson) as Array<{ full_name?: string }>;
         if (repos[0]?.full_name) targetVaultRepo = repos[0].full_name;
       } catch {
@@ -388,7 +435,7 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
       ]);
       const tag = cipher.getAuthTag();
 
-      const gistPayload = JSON.stringify({
+      const gistBody = {
         description: GIST_DESC,
         public: false,
         files: {
@@ -403,20 +450,12 @@ export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIde
             }),
           },
         },
-      });
+      };
 
       if (existingGist) {
-        execFileSync('gh', ['api', `gists/${existingGist.id}`, '-X', 'PATCH', '--input', '-'], {
-          input: gistPayload,
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        ghApi(`gists/${existingGist.id}`, 'PATCH', gistBody);
       } else {
-        execFileSync('gh', ['api', 'gists', '-X', 'POST', '--input', '-'], {
-          input: gistPayload,
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        ghApi('gists', 'POST', gistBody);
       }
     }
 

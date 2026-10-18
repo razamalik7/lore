@@ -15,15 +15,48 @@ export function normalizeFsPath(p: string): string {
     } else {
       cleaned = decodeURIComponent(cleaned);
     }
-    cleaned = cleaned.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
-    if (process.platform === 'win32') {
+    cleaned = cleaned
+      .replace(/^\/+([a-zA-Z]:)/, '$1')
+      .replace(/[\\/]+/g, '/')
+      .replace(/\/+$/, '');
+    if (process.platform === 'win32' || /^[a-zA-Z]:/.test(cleaned)) {
       cleaned = cleaned.toLowerCase();
     }
     return cleaned;
   } catch {
-    const fallback = p.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
-    return process.platform === 'win32' ? fallback.toLowerCase() : fallback;
+    const fallback = p
+      .replace(/^\/+([a-zA-Z]:)/, '$1')
+      .replace(/[\\/]+/g, '/')
+      .replace(/\/+$/, '');
+    return process.platform === 'win32' || /^[a-zA-Z]:/.test(fallback)
+      ? fallback.toLowerCase()
+      : fallback;
   }
+}
+
+/**
+ * Return both collapsed single-dash (`c-users-...`) and non-collapsed (`c--users-...`)
+ * path slugs so Windows drive letters (`C:\` -> `C--`) and worktrees match across all collectors.
+ */
+export function getEncodedRepoSlugs(repoRoot: string): string[] {
+  const cleaned = repoRoot.trim().replace(/[\\/]+$/, '');
+  const slugCollapsed = cleaned.replace(/[:\\/ ]+/g, '-').toLowerCase();
+  const slugExact = cleaned.replace(/[:\\/ ]/g, '-').toLowerCase();
+  return Array.from(new Set([slugExact, slugCollapsed].filter(Boolean)));
+}
+
+export function matchesRepoSlug(dirOrPathSlug: string, repoRoot: string): boolean {
+  const target = dirOrPathSlug.toLowerCase();
+  for (const slug of getEncodedRepoSlugs(repoRoot)) {
+    if (
+      target === slug ||
+      target.startsWith(`${slug}--`) ||
+      target.startsWith(slug)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function isSameOrSubPath(targetPath: string, repoRoot: string): boolean {

@@ -31,6 +31,10 @@ import {
   refreshWorkspaceContextFiles,
   searchLore,
 } from '../src/context-injector.js';
+import {
+  collectClaudeCodeSessions,
+  collectClaudeMemoryTakeaways,
+} from '../src/collectors/claude.js';
 
 function makeTempIdentity(name: string): LocalKeyIdentity {
   const seed = new Uint8Array(crypto.randomBytes(32));
@@ -164,8 +168,59 @@ async function runTests() {
   assert.ok(hits.length >= 1, 'FTS5 search on laptop must find desktop session');
   console.log(`   ✔ Laptop pulled, decrypted, indexed, and generated ~${ruleRes.tokenEstimate}-token digest.`);
 
-  // 3. Test MCP Server over Stdio
-  console.log('3. Testing MCP Server stdio JSON-RPC 2.0 tools...');
+  // 3. Test Windows C-- Claude path slugs, worktree directories, and memory/*.md auto-ingestion
+  console.log('3. Testing Windows C-- Claude path slugs, worktrees, and memory/*.md auto-ingestion...');
+  const fakeClaudeProjects = path.join(tmpRoot, 'claude-projects');
+  const winRepoPath = 'C:\\Users\\nars7\\Projects\\aniML-world';
+  const mainDir = path.join(fakeClaudeProjects, 'C--Users-nars7-Projects-aniML-world');
+  const wtDir = path.join(fakeClaudeProjects, 'C--Users-nars7-Projects-aniML-world--claude-worktrees-jolly-clarke');
+  const memDir = path.join(mainDir, 'memory');
+  fs.mkdirSync(memDir, { recursive: true });
+  fs.mkdirSync(wtDir, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(mainDir, 'sess-main.jsonl'),
+    [
+      JSON.stringify({ sessionId: 'sess-main', timestamp: '2026-10-18T10:00:00Z', type: 'custom-title', customTitle: 'Stylized Water Integration' }),
+      JSON.stringify({ sessionId: 'sess-main', timestamp: '2026-10-18T10:01:00Z', type: 'user', message: { content: 'Integrate Stylized Water 3 rivers' } }),
+      JSON.stringify({ sessionId: 'sess-main', timestamp: '2026-10-18T10:02:00Z', type: 'assistant', message: { content: [{ type: 'text', text: 'Configured cascade spawner and river splines.' }] } }),
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(wtDir, 'sess-wt.jsonl'),
+    [
+      JSON.stringify({ sessionId: 'sess-wt', timestamp: '2026-10-18T11:00:00Z', type: 'user', message: { content: 'Test deer locomotion in worktree' } }),
+      JSON.stringify({ sessionId: 'sess-wt', timestamp: '2026-10-18T11:01:00Z', type: 'assistant', message: { content: [{ type: 'text', text: 'Verified skull-Z height in headless playback.' }] } }),
+    ].join('\n'),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.join(memDir, 'urp-volumes-dead-in-batch-captures.md'),
+    `---\nname: urp-volumes-dead-in-batch-captures\ndescription: "URP volume post-processing silently no-ops in headless manual Camera.Render()"\nmetadata:\n  type: project\n  modified: 2026-07-27T06:26:58.386Z\n---\n\nComposite grades in image space and verify A/B deltas numerically.\n`,
+    'utf8'
+  );
+
+  const collectedClaude = collectClaudeCodeSessions(
+    winRepoPath,
+    { branch: 'main', headCommit: 'abc1234', author: 'nars7' },
+    fakeClaudeProjects
+  );
+  assert.equal(collectedClaude.length, 2, 'Should collect both main C-- project dir and --claude-worktrees dir');
+  assert.equal(collectedClaude[0].title, 'Stylized Water Integration', 'Should parse customTitle from Claude session');
+
+  const collectedMems = collectClaudeMemoryTakeaways(
+    winRepoPath,
+    { branch: 'main', headCommit: 'abc1234', author: 'nars7' },
+    fakeClaudeProjects
+  );
+  assert.equal(collectedMems.length, 1, 'Should auto-harvest Claude memory/*.md files');
+  assert.equal(collectedMems[0].id, 'claude-urp-volumes-dead-in-batch-captures');
+  assert.equal(collectedMems[0].category, 'gotcha');
+  console.log('   ✔ Windows C-- path slugs, worktrees, and Claude memory/*.md auto-import verified.');
+
+  // 4. Test MCP Server over Stdio
+  console.log('4. Testing MCP Server stdio JSON-RPC 2.0 tools...');
   const cliPath = path.resolve('dist/cli.js');
   const mcpProc = spawn('node', [cliPath, 'mcp'], {
     cwd: laptopRepo,

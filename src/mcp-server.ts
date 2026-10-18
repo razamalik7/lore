@@ -24,6 +24,13 @@ const MCP_TOOLS = [
     name: 'lore_status',
     description:
       'Get the current repository Living Digest, recent AI coding sessions across devices, and authorized contributors. Automatically refreshes local sessions.',
+    annotations: {
+      title: 'Lore Status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -38,6 +45,13 @@ const MCP_TOOLS = [
     name: 'lore_search',
     description:
       'Full-text BM25 search across all past AI coding sessions and architectural takeaways in this repository. Use this to recall why code was written, past debugging sessions, or work from another device without burning tokens.',
+    annotations: {
+      title: 'Lore Search',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -61,6 +75,13 @@ const MCP_TOOLS = [
     name: 'lore_get_session',
     description:
       'Retrieve the stripped User/Assistant conversation turns of a specific past session by its ID (or 8-character ID prefix).',
+    annotations: {
+      title: 'Lore Get Session',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -80,6 +101,13 @@ const MCP_TOOLS = [
     name: 'lore_save_takeaway',
     description:
       'Save an important architectural decision, gotcha, convention, or WIP handoff note to the repository Living Digest so future chats and other devices know it automatically.',
+    annotations: {
+      title: 'Lore Save Takeaway',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,6 +132,13 @@ const MCP_TOOLS = [
     name: 'lore_sync',
     description:
       'Collect local AI chat transcripts, encrypt them for authorized contributors, merge with remote refs/ai/lore, and push.',
+    annotations: {
+      title: 'Lore Sync',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
     inputSchema: {
       type: 'object',
       properties: {
