@@ -1,0 +1,35 @@
+{
+  "name": "lore",
+  "version": "0.1.0",
+  "description": "Git-native, zero-token-bloat encrypted AI context & transcript sync across devices and contributors",
+  "type": "module",
+  "bin": {
+    "lore": "./dist/cli.js",
+    "git-lore": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx test/e2e.test.ts"
+  },
+  "keywords": [
+    "git",
+    "ai",
+    "context",
+    "mcp",
+    "antigravity",
+    "claude-code",
+    "memory",
+    "lore"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@noble/curves": "^1.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
