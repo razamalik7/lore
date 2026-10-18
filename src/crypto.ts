@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { execFileSync } from 'node:child_process';
 import { ed25519, x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/curves/ed25519';
 import type { EncryptedEnvelope, RecipientEntry } from './types.js';
 
@@ -135,42 +136,368 @@ export interface LocalKeyIdentity {
   pubBytes: Uint8Array;
 }
 
+const GIST_DESC = 'lore-account-identity-v1 (do not share)';
+const GIST_FILENAME = 'lore-identity.enc.json';
+const VAULT_VAR_NAME = 'LORE_VAULT_KEY';
+
+function deriveAccountVaultKey(
+  vaultSecretB64: string,
+  githubNumericId: number | string,
+  githubNodeId: string,
+  saltB64: string
+): Buffer {
+  const vaultSecret = Buffer.from(vaultSecretB64, 'base64');
+  if (vaultSecret.length < 32) {
+    throw new Error('Invalid LORE_VAULT_KEY length (expected 32-byte base64 secret)');
+  }
+  const ikm = Buffer.concat([
+    vaultSecret,
+    Buffer.from(`:lore-github-account-v2:${githubNumericId}:${githubNodeId}`, 'utf8'),
+  ]);
+  const salt = Buffer.from(saltB64, 'base64');
+  return Buffer.from(
+    crypto.hkdfSync('sha256', ikm, salt, Buffer.from('lore-account-vault-aes256gcm-v2', 'utf8'), 32)
+  );
+}
+
 /**
- * Discover the user's local `~/.ssh/id_ed25519` key or create a fallback `~/.ssh/lore_ed25519` key.
+ * Parse `owner/repo` from a Git repository's `origin` remote URL if it points to GitHub.
  */
-export function ensureLocalIdentity(): LocalKeyIdentity {
+export function detectGithubOwnerRepo(repoRoot = process.cwd()): string | null {
+  try {
+    const url = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const httpsMatch = url.match(/github\.com[/:]([^/]+\/[^/.]+?)(?:\.git)?$/i);
+    if (httpsMatch) return httpsMatch[1];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function getRepoVaultKey(ownerRepo: string): string | null {
+  try {
+    const out = execFileSync('gh', ['api', `repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const parsed = JSON.parse(out) as { value?: string };
+    return parsed.value || null;
+  } catch {
+    return null;
+  }
+}
+
+function setRepoVaultKey(ownerRepo: string, vaultKeyB64: string): boolean {
+  try {
+    const existing = getRepoVaultKey(ownerRepo);
+    if (existing) {
+      execFileSync(
+        'gh',
+        ['api', `repos/${ownerRepo}/actions/variables/${VAULT_VAR_NAME}`, '-X', 'PATCH', '-f', `name=${VAULT_VAR_NAME}`, '-f', `value=${vaultKeyB64}`],
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+    } else {
+      execFileSync(
+        'gh',
+        ['api', `repos/${ownerRepo}/actions/variables`, '-X', 'POST', '-f', `name=${VAULT_VAR_NAME}`, '-f', `value=${vaultKeyB64}`],
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sync (or initialize) a dedicated `lore`-only account key (`~/.ssh/lore_account_ed25519`)
+ * across the user's own devices using a 2-Part Split Lock:
+ *  - Part 1: AES-256-GCM encrypted key envelope in an unlisted Secret Gist (discoverable only via authenticated `GET /gists`).
+ *  - Part 2: 256-bit random `LORE_VAULT_KEY` stored in the GitHub repository's Actions Variables (`repos/{owner}/{repo}/actions/variables/LORE_VAULT_KEY`),
+ *            which strictly returns 401/403 to anyone without authenticated repo push access.
+ * - Never touches or uploads the user's personal `~/.ssh/id_ed25519` key.
+ * - Never creates any extra GitHub repositories.
+ */
+export function syncGithubAccountIdentity(repoRoot = process.cwd()): LocalKeyIdentity | null {
+  const sshDir = path.join(os.homedir(), '.ssh');
+  const accountPrivPath = path.join(sshDir, 'lore_account_ed25519');
+  const accountPubPath = `${accountPrivPath}.pub`;
+
+  try {
+    // 1. Verify `gh` is authenticated and fetch user's GitHub login, id, node_id
+    const userJson = execFileSync('gh', ['api', 'user'], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const user = JSON.parse(userJson) as { login: string; id: number; node_id: string };
+    if (!user.login || !user.id || !user.node_id) return null;
+
+    const label = `github:${user.login}`;
+    const currentOwnerRepo = detectGithubOwnerRepo(repoRoot);
+
+    // 2. Query authenticated user's gists for existing lore envelope
+    const gistsJson = execFileSync('gh', ['api', 'gists?per_page=100'], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    const gists = JSON.parse(gistsJson) as Array<{
+      id: string;
+      public: boolean;
+      description: string;
+      files: Record<string, { filename: string }>;
+    }>;
+
+    const existingGist = gists.find(
+      (g) => !g.public && g.description === GIST_DESC && g.files && g.files[GIST_FILENAME]
+    );
+
+    if (existingGist) {
+      const detailJson = execFileSync('gh', ['api', `gists/${existingGist.id}`], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const detail = JSON.parse(detailJson);
+      const rawContent = detail?.files?.[GIST_FILENAME]?.content;
+      if (rawContent) {
+        const env = JSON.parse(rawContent) as {
+          v: number;
+          vaultRepo?: string;
+          salt: string;
+          iv: string;
+          tag: string;
+          ct: string;
+        };
+
+        if (env.v === 2) {
+          // Fetch Part 2 (256-bit random LORE_VAULT_KEY) from repo Actions variable or local cache
+          let vaultKey: string | null = null;
+          if (currentOwnerRepo) {
+            vaultKey = getRepoVaultKey(currentOwnerRepo);
+          }
+          if (!vaultKey && env.vaultRepo && env.vaultRepo !== currentOwnerRepo) {
+            vaultKey = getRepoVaultKey(env.vaultRepo);
+          }
+          if (!vaultKey && fs.existsSync(accountPrivPath)) {
+            try {
+              const cached = JSON.parse(fs.readFileSync(accountPrivPath, 'utf8'));
+              if (cached.vaultKey) vaultKey = cached.vaultKey;
+            } catch {
+              // Ignore
+            }
+          }
+
+          if (vaultKey) {
+            // Ensure current repo also has LORE_VAULT_KEY if we're in a repo owned by this user
+            if (currentOwnerRepo && currentOwnerRepo.toLowerCase().startsWith(`${user.login.toLowerCase()}/`)) {
+              setRepoVaultKey(currentOwnerRepo, vaultKey);
+            }
+
+            const key = deriveAccountVaultKey(vaultKey, user.id, user.node_id, env.salt);
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(env.iv, 'base64'));
+            decipher.setAuthTag(Buffer.from(env.tag, 'base64'));
+            const decrypted = Buffer.concat([
+              decipher.update(Buffer.from(env.ct, 'base64')),
+              decipher.final(),
+            ]).toString('utf8');
+            const parsed = JSON.parse(decrypted) as { seed: string };
+            const seed = new Uint8Array(Buffer.from(parsed.seed, 'base64'));
+            const pub = ed25519.getPublicKey(seed);
+            const pubLine = formatSshEd25519Pub(pub, label);
+
+            fs.mkdirSync(sshDir, { recursive: true });
+            fs.writeFileSync(
+              accountPrivPath,
+              JSON.stringify({ seed: parsed.seed, vaultKey, label }, null, 2),
+              { mode: 0o600 }
+            );
+            fs.writeFileSync(accountPubPath, `${pubLine}\n`, { mode: 0o644 });
+
+            return {
+              privPath: accountPrivPath,
+              pubLine,
+              fingerprint: getSshFingerprint(pubLine),
+              label,
+              seed,
+              pubBytes: pub,
+            };
+          }
+        }
+      }
+    }
+
+    // 3. Initialize or upgrade to v2 Split-Lock (requires a target GitHub repo for Part 2 variable storage)
+    let seed: Uint8Array;
+    let vaultKeyB64: string = crypto.randomBytes(32).toString('base64');
+    if (fs.existsSync(accountPrivPath)) {
+      const rawLocal = fs.readFileSync(accountPrivPath, 'utf8');
+      const local = parseSshEd25519Priv(rawLocal);
+      seed = local.seed;
+      try {
+        const parsedLocal = JSON.parse(rawLocal);
+        if (parsedLocal.vaultKey) vaultKeyB64 = parsedLocal.vaultKey;
+      } catch {
+        // Use newly generated vaultKeyB64
+      }
+    } else {
+      seed = new Uint8Array(crypto.randomBytes(32));
+    }
+
+    const pub = ed25519.getPublicKey(seed);
+    const pubLine = formatSshEd25519Pub(pub, label);
+    const seedB64 = Buffer.from(seed).toString('base64');
+
+    fs.mkdirSync(sshDir, { recursive: true });
+    fs.writeFileSync(
+      accountPrivPath,
+      JSON.stringify({ seed: seedB64, vaultKey: vaultKeyB64, label }, null, 2),
+      { mode: 0o600 }
+    );
+    fs.writeFileSync(accountPubPath, `${pubLine}\n`, { mode: 0o644 });
+
+    // Store Part 2 in the current repo's Actions Variables (or fallback to user's primary owned repo if outside a git repo)
+    let targetVaultRepo = currentOwnerRepo;
+    if (!targetVaultRepo) {
+      try {
+        const reposJson = execFileSync('gh', ['api', 'user/repos?affiliation=owner&per_page=1&sort=pushed'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        const repos = JSON.parse(reposJson) as Array<{ full_name?: string }>;
+        if (repos[0]?.full_name) targetVaultRepo = repos[0].full_name;
+      } catch {
+        // Ignore
+      }
+    }
+    if (targetVaultRepo) {
+      const stored = setRepoVaultKey(targetVaultRepo, vaultKeyB64);
+      if (!stored) targetVaultRepo = null;
+    }
+
+    if (targetVaultRepo) {
+      const salt = crypto.randomBytes(32).toString('base64');
+      const iv = crypto.randomBytes(12);
+      const key = deriveAccountVaultKey(vaultKeyB64, user.id, user.node_id, salt);
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+      const ct = Buffer.concat([
+        cipher.update(JSON.stringify({ seed: seedB64, createdAt: new Date().toISOString() }), 'utf8'),
+        cipher.final(),
+      ]);
+      const tag = cipher.getAuthTag();
+
+      const gistPayload = JSON.stringify({
+        description: GIST_DESC,
+        public: false,
+        files: {
+          [GIST_FILENAME]: {
+            content: JSON.stringify({
+              v: 2,
+              vaultRepo: targetVaultRepo,
+              salt,
+              iv: iv.toString('base64'),
+              tag: tag.toString('base64'),
+              ct: ct.toString('base64'),
+            }),
+          },
+        },
+      });
+
+      if (existingGist) {
+        execFileSync('gh', ['api', `gists/${existingGist.id}`, '-X', 'PATCH', '--input', '-'], {
+          input: gistPayload,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } else {
+        execFileSync('gh', ['api', 'gists', '-X', 'POST', '--input', '-'], {
+          input: gistPayload,
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }
+    }
+
+    return {
+      privPath: accountPrivPath,
+      pubLine,
+      fingerprint: getSshFingerprint(pubLine),
+      label,
+      seed,
+      pubBytes: pub,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load all available local identities on this machine (both the GitHub-account-synced
+ * `~/.ssh/lore_account_ed25519` key AND the device's `~/.ssh/id_ed25519` / `~/.ssh/lore_ed25519` keys).
+ */
+export function getAllLocalIdentities(): LocalKeyIdentity[] {
   const sshDir = path.join(os.homedir(), '.ssh');
   const candidates = [
+    path.join(sshDir, 'lore_account_ed25519'),
     path.join(sshDir, 'id_ed25519'),
     path.join(sshDir, 'lore_ed25519'),
   ];
 
+  const found: LocalKeyIdentity[] = [];
   for (const privPath of candidates) {
-    if (fs.existsSync(privPath)) {
-      try {
-        const privContent = fs.readFileSync(privPath, 'utf8');
-        const { seed, pub } = parseSshEd25519Priv(privContent);
-        const pubPath = `${privPath}.pub`;
-        const defaultComment = `${os.userInfo().username}@${os.hostname()}`;
-        const pubLine = fs.existsSync(pubPath)
-          ? fs.readFileSync(pubPath, 'utf8').trim()
-          : formatSshEd25519Pub(pub, defaultComment);
-        const fingerprint = getSshFingerprint(pubLine);
-        return {
-          privPath,
-          pubLine,
-          fingerprint,
-          label: `local:${defaultComment}`,
-          seed,
-          pubBytes: pub,
-        };
-      } catch {
-        // Try next candidate if encrypted or unreadable
+    if (!fs.existsSync(privPath)) continue;
+    try {
+      const privContent = fs.readFileSync(privPath, 'utf8');
+      const { seed, pub } = parseSshEd25519Priv(privContent);
+      const pubPath = `${privPath}.pub`;
+      const defaultComment = `${os.userInfo().username}@${os.hostname()}`;
+      let label = `local:${defaultComment}`;
+      if (privContent.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(privContent);
+          if (parsed.label) label = parsed.label;
+        } catch {
+          // Ignore
+        }
       }
+      const pubLine = fs.existsSync(pubPath)
+        ? fs.readFileSync(pubPath, 'utf8').trim()
+        : formatSshEd25519Pub(pub, label);
+      const fingerprint = getSshFingerprint(pubLine);
+      found.push({
+        privPath,
+        pubLine,
+        fingerprint,
+        label,
+        seed,
+        pubBytes: pub,
+      });
+    } catch {
+      // Try next
     }
+  }
+  return found;
+}
+
+/**
+ * Discover the user's primary identity (preferring the GitHub-account-synced `~/.ssh/lore_account_ed25519`
+ * so all devices logged into the same GitHub account decrypt seamlessly, falling back to `~/.ssh/id_ed25519`).
+ */
+export function ensureLocalIdentity(repoRoot?: string): LocalKeyIdentity {
+  const accountPrivPath = path.join(os.homedir(), '.ssh', 'lore_account_ed25519');
+  if (!fs.existsSync(accountPrivPath)) {
+    syncGithubAccountIdentity(repoRoot);
+  }
+
+  const existing = getAllLocalIdentities();
+  if (existing.length > 0) {
+    return existing[0];
   }
 
   // Generate fallback ~/.ssh/lore_ed25519
+  const sshDir = path.join(os.homedir(), '.ssh');
   fs.mkdirSync(sshDir, { recursive: true });
   const seed = new Uint8Array(crypto.randomBytes(32));
   const pub = ed25519.getPublicKey(seed);
@@ -284,10 +611,22 @@ export function encryptForRecipients(plaintext: string, recipients: RecipientEnt
 }
 
 /**
- * Decrypt an EncryptedEnvelope using the user's local SSH Ed25519 key.
+ * Decrypt an EncryptedEnvelope using any matching local or GitHub-account identity.
  */
 export function decryptWithLocalIdentity(envelope: EncryptedEnvelope, identity?: LocalKeyIdentity): string {
-  const id = identity ?? ensureLocalIdentity();
+  let candidates = identity ? [identity] : getAllLocalIdentities();
+  let matchedIdentity = candidates.find((c) => envelope.wraps.some((w) => w.fp === c.fingerprint));
+
+  // If no local key matched yet and no explicit identity was forced, try syncing GitHub account identity on the fly
+  if (!matchedIdentity && !identity) {
+    const synced = syncGithubAccountIdentity();
+    if (synced && envelope.wraps.some((w) => w.fp === synced.fingerprint)) {
+      matchedIdentity = synced;
+    }
+    candidates = getAllLocalIdentities();
+  }
+
+  const id = matchedIdentity ?? candidates[0] ?? ensureLocalIdentity();
   const wrap = envelope.wraps.find((w) => w.fp === id.fingerprint);
   if (!wrap) {
     throw new Error(

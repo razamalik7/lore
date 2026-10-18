@@ -14,6 +14,7 @@ import {
   decryptWithLocalIdentity,
   encryptForRecipients,
   ensureLocalIdentity,
+  getAllLocalIdentities,
 } from './crypto.js';
 import { collectAntigravitySessions } from './collectors/antigravity.js';
 import { collectClaudeCodeSessions } from './collectors/claude.js';
@@ -90,26 +91,42 @@ export function stripBom(str: string): string {
 
 export function loadManifest(repoRoot: string): LoreManifest {
   const paths = ensureLocalLoreDirs(repoRoot);
+  ensureLocalIdentity(repoRoot);
+  const localIdentities = getAllLocalIdentities();
+
   if (fs.existsSync(paths.manifestPath)) {
     try {
-      return JSON.parse(stripBom(fs.readFileSync(paths.manifestPath, 'utf8')));
+      const existing = JSON.parse(stripBom(fs.readFileSync(paths.manifestPath, 'utf8'))) as LoreManifest;
+      let changed = false;
+      for (const id of localIdentities) {
+        if (!existing.recipients.some((r) => r.fingerprint === id.fingerprint)) {
+          existing.recipients.push({
+            label: id.label,
+            sshPublicKey: id.pubLine,
+            fingerprint: id.fingerprint,
+            addedAt: new Date().toISOString(),
+          });
+          changed = true;
+        }
+      }
+      if (changed) saveManifest(repoRoot, existing);
+      return existing;
     } catch {
       // Fallthrough
     }
   }
-  const identity = ensureLocalIdentity();
+
+  const now = new Date().toISOString();
   const initial: LoreManifest = {
     version: 1,
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
     encryption: 'ssh-x25519-aes256gcm',
-    recipients: [
-      {
-        label: identity.label,
-        sshPublicKey: identity.pubLine,
-        fingerprint: identity.fingerprint,
-        addedAt: new Date().toISOString(),
-      },
-    ],
+    recipients: localIdentities.map((id) => ({
+      label: id.label,
+      sshPublicKey: id.pubLine,
+      fingerprint: id.fingerprint,
+      addedAt: now,
+    })),
   };
   saveManifest(repoRoot, initial);
   return initial;
@@ -219,7 +236,7 @@ export function importFromGitRef(repoRoot: string, refName = LORE_REF): {
     return { importedSessions: 0, importedTakeaways: 0 };
   }
 
-  const identity = ensureLocalIdentity();
+  ensureLocalIdentity(repoRoot);
 
   // 1. Read manifest.json if present
   const remoteManifestRaw = tryGit(repoRoot, ['show', `${refSha}:manifest.json`]);
@@ -246,7 +263,7 @@ export function importFromGitRef(repoRoot: string, refName = LORE_REF): {
   if (remoteTakeawaysRaw) {
     try {
       const env = JSON.parse(remoteTakeawaysRaw) as EncryptedEnvelope;
-      const decrypted = decryptWithLocalIdentity(env, identity);
+      const decrypted = decryptWithLocalIdentity(env);
       const parsed = JSON.parse(decrypted) as { takeaways?: TakeawayEntry[] };
       if (Array.isArray(parsed.takeaways)) {
         const current = loadTakeaways(repoRoot);
@@ -266,7 +283,7 @@ export function importFromGitRef(repoRoot: string, refName = LORE_REF): {
       if (!rawEnv) continue;
       try {
         const env = JSON.parse(rawEnv) as EncryptedEnvelope;
-        const decrypted = decryptWithLocalIdentity(env, identity);
+        const decrypted = decryptWithLocalIdentity(env);
         const session = JSON.parse(decrypted) as SessionRecord;
         saveLocalSession(repoRoot, session);
         importedSessions++;

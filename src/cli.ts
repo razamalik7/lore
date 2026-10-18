@@ -7,6 +7,7 @@ import {
   ensureLocalIdentity,
   fetchGithubUserKeys,
   getSshFingerprint,
+  syncGithubAccountIdentity,
 } from './crypto.js';
 import {
   collectAndCacheLocalSessions,
@@ -84,7 +85,8 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'setup') {
-    const id = ensureLocalIdentity();
+    syncGithubAccountIdentity(process.cwd());
+    const id = ensureLocalIdentity(process.cwd());
     const res = installGlobalAgentIntegrations(__filename);
     console.log('✔ lore global setup complete!');
     console.log(`  • Local SSH Identity : ${id.label} (${id.fingerprint})`);
@@ -118,7 +120,8 @@ async function main(): Promise<void> {
 
   if (cmd === 'init') {
     const repoRoot = requireRepoRoot();
-    const id = ensureLocalIdentity();
+    syncGithubAccountIdentity(repoRoot);
+    const id = ensureLocalIdentity(repoRoot);
     const manifest = loadManifest(repoRoot);
     if (!manifest.recipients.some((r) => r.fingerprint === id.fingerprint)) {
       manifest.recipients.push({
