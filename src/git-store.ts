@@ -19,6 +19,7 @@ import { collectAntigravitySessions } from './collectors/antigravity.js';
 import { collectClaudeCodeSessions } from './collectors/claude.js';
 import { collectCursorSessions } from './collectors/cursor.js';
 import { collectCodexSessions } from './collectors/codex.js';
+import { redactSecrets } from './redactor.js';
 
 export const LORE_REF = 'refs/ai/lore';
 export const LORE_REMOTE_REF = 'refs/remotes/origin/ai-lore';
@@ -134,7 +135,7 @@ export function saveTakeaways(repoRoot: string, takeaways: TakeawayEntry[]): voi
   const paths = ensureLocalLoreDirs(repoRoot);
   const byId = new Map<string, TakeawayEntry>();
   for (const t of takeaways) {
-    byId.set(t.id, t);
+    byId.set(t.id, { ...t, content: redactSecrets(t.content) });
   }
   const sorted = Array.from(byId.values()).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   fs.writeFileSync(paths.takeawaysPath, JSON.stringify(sorted, null, 2), 'utf8');
@@ -171,7 +172,13 @@ export function saveLocalSession(repoRoot: string, session: SessionRecord): void
       // Overwrite
     }
   }
-  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), 'utf8');
+  const scrubbed: SessionRecord = {
+    ...session,
+    title: redactSecrets(session.title),
+    recap: redactSecrets(session.recap),
+    turns: session.turns.map((t) => ({ ...t, text: redactSecrets(t.text) })),
+  };
+  fs.writeFileSync(filePath, JSON.stringify(scrubbed, null, 2), 'utf8');
 }
 
 /**
