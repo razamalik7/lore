@@ -81,11 +81,15 @@ export function ensureLocalLoreDirs(repoRoot: string): LocalLorePaths {
   return paths;
 }
 
+export function stripBom(str: string): string {
+  return str.charCodeAt(0) === 0xfeff ? str.slice(1) : str;
+}
+
 export function loadManifest(repoRoot: string): LoreManifest {
   const paths = ensureLocalLoreDirs(repoRoot);
   if (fs.existsSync(paths.manifestPath)) {
     try {
-      return JSON.parse(fs.readFileSync(paths.manifestPath, 'utf8'));
+      return JSON.parse(stripBom(fs.readFileSync(paths.manifestPath, 'utf8')));
     } catch {
       // Fallthrough
     }
@@ -118,7 +122,7 @@ export function loadTakeaways(repoRoot: string): TakeawayEntry[] {
   const paths = ensureLocalLoreDirs(repoRoot);
   if (!fs.existsSync(paths.takeawaysPath)) return [];
   try {
-    return JSON.parse(fs.readFileSync(paths.takeawaysPath, 'utf8'));
+    return JSON.parse(stripBom(fs.readFileSync(paths.takeawaysPath, 'utf8')));
   } catch {
     return [];
   }
@@ -141,7 +145,7 @@ export function loadAllLocalSessions(repoRoot: string): SessionRecord[] {
   const records: SessionRecord[] = [];
   for (const f of files) {
     try {
-      const rec = JSON.parse(fs.readFileSync(path.join(paths.sessionsDir, f), 'utf8')) as SessionRecord;
+      const rec = JSON.parse(stripBom(fs.readFileSync(path.join(paths.sessionsDir, f), 'utf8'))) as SessionRecord;
       records.push(rec);
     } catch {
       // Ignore corrupt file
@@ -156,7 +160,7 @@ export function saveLocalSession(repoRoot: string, session: SessionRecord): void
   const filePath = path.join(paths.sessionsDir, `${safeId}.json`);
   if (fs.existsSync(filePath)) {
     try {
-      const existing = JSON.parse(fs.readFileSync(filePath, 'utf8')) as SessionRecord;
+      const existing = JSON.parse(stripBom(fs.readFileSync(filePath, 'utf8'))) as SessionRecord;
       // Only overwrite if incoming has >= turns or newer timestamp
       if (existing.turns.length > session.turns.length && existing.updatedAt > session.updatedAt) {
         return;
@@ -355,7 +359,7 @@ export function pullLoreFromRemote(repoRoot: string, remote = 'origin'): {
     return { fetched: false, importedSessions: 0, importedTakeaways: 0 };
   }
 
-  const fetchOut = tryGit(repoRoot, ['fetch', remote, `${LORE_REF}:${LORE_REMOTE_REF}`]);
+  const fetchOut = tryGit(repoRoot, ['fetch', remote, `+${LORE_REF}:${LORE_REMOTE_REF}`]);
   if (fetchOut === null) {
     // Remote may not have refs/ai/lore yet
     return { fetched: false, importedSessions: 0, importedTakeaways: 0 };

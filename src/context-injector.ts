@@ -105,7 +105,7 @@ export function searchLore(repoRoot: string, query: string, limit = 8): SearchHi
   }
 
   const sanitized = query
-    .replace(/[^\w\s-]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
     .trim()
     .split(/\s+/)
     .filter(Boolean)
