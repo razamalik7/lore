@@ -151,7 +151,7 @@ export function collectClaudeCodeSessions(
       }
     }
 
-    const normFile = normalizeFsPath(filePath);
+    const normFile = normalizeFsPath(filePath).toLowerCase();
     if (!matchedCwd && !repoSlugs.some((slug) => normFile.includes(slug))) {
       continue;
     }
