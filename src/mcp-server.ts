@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   collectAndCacheLocalSessions,
   commitToGitRef,
@@ -156,12 +159,69 @@ const MCP_TOOLS = [
 ];
 
 function resolveRepo(repoPathArg?: unknown): string {
-  const start = typeof repoPathArg === 'string' && repoPathArg.trim() ? repoPathArg.trim() : process.cwd();
-  const root = findGitRoot(start);
-  if (!root) {
-    throw new Error(`Not inside a Git repository: ${start}`);
+  const home = os.homedir();
+  const candidates: string[] = [];
+
+  if (typeof repoPathArg === 'string' && repoPathArg.trim()) {
+    const raw = repoPathArg.trim();
+    candidates.push(raw);
+
+    // Handle WSL /mnt/<drive>/... paths on Windows
+    const wslMatch = raw.match(/^\/mnt\/([a-zA-Z])\/(.*)$/);
+    if (wslMatch && process.platform === 'win32') {
+      candidates.push(`${wslMatch[1].toUpperCase()}:\\${wslMatch[2].replace(/\//g, '\\')}`);
+    }
+
+    // Handle Cowork / Linux sandbox mounted paths (e.g. /sessions/.../mnt/<RepoName>) or bare repo names
+    const base = path.basename(raw.replace(/\\/g, '/'));
+    if (base) {
+      candidates.push(
+        path.join(home, 'Projects', base),
+        path.join(home, 'projects', base),
+        path.join(home, base)
+      );
+    }
+  } else {
+    candidates.push(process.cwd());
   }
-  return root;
+
+  for (const candidate of candidates) {
+    try {
+      const root = findGitRoot(candidate);
+      if (root) return root;
+    } catch {
+      // Ignore invalid path candidates
+    }
+  }
+
+  // Fallback for Claude Desktop when spawned outside a repo working directory:
+  // search ~/Projects for the most recently updated Lore-initialized repository
+  const projectsDirs = [path.join(home, 'Projects'), path.join(home, 'projects')];
+  let bestRepo: { root: string; mtimeMs: number } | null = null;
+  for (const projDir of projectsDirs) {
+    if (!fs.existsSync(projDir)) continue;
+    try {
+      for (const entry of fs.readdirSync(projDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const full = path.join(projDir, entry.name);
+        const loreDir = path.join(full, '.git', 'lore');
+        if (fs.existsSync(loreDir)) {
+          const stat = fs.statSync(loreDir);
+          if (!bestRepo || stat.mtimeMs > bestRepo.mtimeMs) {
+            bestRepo = { root: full, mtimeMs: stat.mtimeMs };
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+  if (bestRepo) {
+    return bestRepo.root;
+  }
+
+  const start = typeof repoPathArg === 'string' && repoPathArg.trim() ? repoPathArg.trim() : process.cwd();
+  throw new Error(`Not inside a Git repository: ${start}. Pass repoPath (e.g. "${path.join(home, 'Projects', 'my-repo')}").`);
 }
 
 async function handleToolCall(name: string, args: Record<string, any>): Promise<string> {
