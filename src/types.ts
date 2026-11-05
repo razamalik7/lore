@@ -60,9 +60,28 @@ export interface SessionIndexMeta {
 
 export interface LoreManifest {
   version: 1;
+  /**
+   * Layout of the data stored in refs/ai/lore. Missing means 1.
+   * Clients refuse to write a ref whose format is newer than they understand,
+   * because rewriting it would drop data they can't read.
+   */
+  format?: number;
   updatedAt: string;
   encryption: 'ssh-x25519-aes256gcm' | 'none';
   recipients: RecipientEntry[];
+  /**
+   * Keys removed with `lore revoke`, so merging another device's manifest doesn't re-add them.
+   * A recipient entry added after the revoke (`lore allow` again) wins.
+   */
+  revoked?: Array<{ fingerprint: string; at: string }>;
+}
+
+/** Marks a session or takeaway as deleted so other devices' merges don't bring it back. */
+export interface TombstoneEntry {
+  id: string;
+  kind: 'session' | 'takeaway';
+  at: string;
+  by: string;
 }
 
 export interface EncryptedEnvelope {

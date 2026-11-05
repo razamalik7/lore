@@ -99,6 +99,11 @@ You can run commands as either `lore <cmd>` or native Git subcommand `git lore <
 | `lore note "<text>"` | Save an architectural decision, gotcha, convention, or WIP note (`--cat decision\|architecture\|gotcha\|wip\|convention`) |
 | `lore search <query>` | Instant SQLite FTS5 BM25 search across all past sessions and takeaways |
 | `lore show <session-id>` | Read the stripped User/Assistant conversation turns of a session in your terminal |
+| `lore forget <id> [...]` | Delete sessions or takeaways by id/prefix on every device (recorded as tombstones so merges don't bring them back) |
+| `lore forget --check` | List sessions from this device that no longer belong to this repo (e.g. filed here by older versions) |
+| `lore compact` | Rewrite `refs/ai/lore` as a single commit, purging old history (including forgotten or revoked data) from the remote |
+
+> **Upgrading:** lore data written by one version must be readable by every device that syncs the repo. After upgrading lore on one machine, upgrade the others too (`npm i -g git-lore-cli@latest && lore setup`).
 
 ---
 

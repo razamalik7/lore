@@ -12,7 +12,10 @@ import {
 import {
   collectAndCacheLocalSessions,
   commitToGitRef,
+  compactLoreRef,
   findGitRoot,
+  findMisfiledSessions,
+  forgetItems,
   getGitMeta,
   importFromGitRef,
   LORE_REF,
@@ -20,6 +23,7 @@ import {
   loadAllLocalSessions,
   loadManifest,
   loadTakeaways,
+  mergeRevoked,
   pullLoreFromRemote,
   pushLoreToRemote,
   saveManifest,
@@ -30,12 +34,48 @@ import {
   refreshWorkspaceContextFiles,
   searchLore,
 } from './context-injector.js';
-import { installGitHooks } from './hooks.js';
+import {
+  appendHookLog,
+  getInstalledHookCliPath,
+  installGitHooks,
+  readLastHookEntry,
+  refreshHooksIfStale,
+} from './hooks.js';
+import { resolveStableCliPath } from './install-path.js';
 import { installGlobalAgentIntegrations } from './global-setup.js';
 import { startMcpServer } from './mcp-server.js';
 import type { TakeawayEntry } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
+const IS_DEV_SOURCE = __filename.endsWith('.ts');
+
+/**
+ * If this repo's lore hooks call a different copy of lore than the stable install, re-point them.
+ * Cheap when they already match; only resolves the global install path when they don't.
+ */
+function healStaleHooks(repoRoot: string): void {
+  if (IS_DEV_SOURCE) return;
+  try {
+    const hookPath = getInstalledHookCliPath(repoRoot);
+    if (!hookPath || hookPath.toLowerCase() === __filename.replace(/\\/g, '/').toLowerCase()) return;
+    const stable = resolveStableCliPath(__filename);
+    if (refreshHooksIfStale(repoRoot, stable.path)) {
+      console.error(`  (re-pointed this repo's lore git hooks at ${stable.path})`);
+    }
+  } catch {
+    // Never block a command on hook maintenance
+  }
+}
+
+function runHook(hook: string, fn: (root: string) => string): void {
+  const root = findGitRoot(process.cwd());
+  if (!root) return;
+  try {
+    appendHookLog(root, hook, 'ok', fn(root));
+  } catch (err: any) {
+    appendHookLog(root, hook, 'error', err?.message || String(err));
+  }
+}
 
 function formatKB(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -81,6 +121,9 @@ Usage:
   lore note <text> [--cat <type>]    Save an architectural decision, gotcha, or WIP note to the Living Digest
   lore search <query>                Full-text BM25 search across all past sessions & takeaways
   lore show <session-id>             View the stripped conversation turns of a session in your terminal
+  lore forget <id> [<id>...]         Delete sessions/takeaways by id or prefix (on every device, after sync)
+  lore forget --check                List sessions from this device that no longer belong to this repo
+  lore compact                       Rewrite refs/ai/lore without history (purges forgotten/revoked data)
   lore mcp                           Run the Model Context Protocol (MCP) server over stdio
 `);
 }
@@ -102,12 +145,15 @@ async function main(): Promise<void> {
   if (cmd === 'setup') {
     syncGithubAccountIdentity(process.cwd());
     const id = ensureLocalIdentity(process.cwd());
-    const res = installGlobalAgentIntegrations(__filename);
+    const stable = resolveStableCliPath(__filename, args.includes('--use-this-copy'));
+    const res = installGlobalAgentIntegrations(stable.path);
     console.log('✔ lore global setup complete!');
     console.log(`  • Local SSH Identity : ${id.label} (${id.fingerprint})`);
     console.log(`  • Key Path           : ${id.privPath}`);
     console.log(`  • Antigravity MCP    : ${res.antigravityMcpPath}`);
     console.log(`  • Antigravity Skill  : ${res.antigravitySkillPath}`);
+    console.log(`  • lore Entry Point   : ${stable.path}`);
+    if (stable.note) console.log(`    (${stable.note})`);
     if (res.claudeConfigUpdated) {
       console.log(`  • Claude Code MCP    : ~/.claude.json (updated)`);
     }
@@ -116,20 +162,25 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'hook-pre-push') {
-    const root = findGitRoot(process.cwd());
-    if (!root) return;
-    const remote = args[1] || 'origin';
-    pushLoreToRemote(root, remote);
-    refreshWorkspaceContextFiles(root);
+    runHook('hook-pre-push', (root) => {
+      const remote = args[1] || 'origin';
+      const res = pushLoreToRemote(root, remote);
+      refreshWorkspaceContextFiles(root);
+      if (!res.pushed && res.error) throw new Error(`push failed: ${res.error}`);
+      return `${res.sessionCount} sessions, ${res.pushed ? 'pushed' : 'local only'} (${res.commitSha.slice(0, 8)})`;
+    });
     return;
   }
 
   if (cmd === 'hook-post-merge') {
-    const root = findGitRoot(process.cwd());
-    if (!root) return;
-    pullLoreFromRemote(root);
-    collectAndCacheLocalSessions(root);
-    refreshWorkspaceContextFiles(root);
+    runHook('hook-post-merge', (root) => {
+      const pull = pullLoreFromRemote(root);
+      collectAndCacheLocalSessions(root);
+      refreshWorkspaceContextFiles(root);
+      if (pull.newerFormat) throw new Error(`remote lore uses newer format ${pull.newerFormat}; upgrade lore`);
+      if (pull.decryptionError) throw new Error(`decryption failed: ${pull.decryptionError}`);
+      return pull.fetched ? `imported ${pull.importedSessions} sessions` : 'no remote lore';
+    });
     return;
   }
 
@@ -148,7 +199,10 @@ async function main(): Promise<void> {
       saveManifest(repoRoot, manifest);
     }
 
-    const hooks = installGitHooks(repoRoot, __filename);
+    const hooks = installGitHooks(
+      repoRoot,
+      resolveStableCliPath(__filename, args.includes('--use-this-copy')).path
+    );
     const { pullRes, collectRes, commitRes, ruleRes } = withProgress(
       'Collecting & encrypting local AI sessions',
       () => {
@@ -177,6 +231,7 @@ async function main(): Promise<void> {
 
   if (cmd === 'sync' || cmd === 'push') {
     const repoRoot = requireRepoRoot();
+    healStaleHooks(repoRoot);
     const { res, ruleRes } = withProgress('Syncing & encrypting AI sessions', () => {
       const res = pushLoreToRemote(repoRoot);
       const ruleRes = refreshWorkspaceContextFiles(repoRoot);
@@ -186,6 +241,7 @@ async function main(): Promise<void> {
     console.log(`  • Sessions           : ${res.sessionCount}`);
     console.log(`  • Takeaways          : ${res.takeawayCount}`);
     console.log(`  • Remote Push        : ${res.pushed ? 'pushed to origin' : 'saved locally (no remote or offline)'}`);
+    if (res.error) console.log(`    ⚠ ${res.error.split(/\r?\n/)[0]}`);
     console.log(`  • Living Digest      : ~${ruleRes.tokenEstimate} tokens (.agents/rules/lore-context.md)`);
     return;
   }
@@ -199,6 +255,12 @@ async function main(): Promise<void> {
       const ruleRes = refreshWorkspaceContextFiles(repoRoot);
       return { pullRes, collectRes, ruleRes };
     });
+    if (pullRes.newerFormat) {
+      console.error(
+        `✖ This repo's lore data uses format ${pullRes.newerFormat}, newer than this lore understands. Upgrade: npm i -g git-lore-cli@latest`
+      );
+      process.exit(1);
+    }
     if (pullRes.decryptionError) {
       console.error(`✖ Decryption error: ${pullRes.decryptionError}`);
       process.exit(1);
@@ -264,6 +326,7 @@ async function main(): Promise<void> {
     const manifest = loadManifest(repoRoot);
     const clean = query.replace(/^@/, '').toLowerCase();
     const before = manifest.recipients.length;
+    const beforeFps = manifest.recipients.map((r) => r.fingerprint);
     manifest.recipients = manifest.recipients.filter(
       (r) =>
         !r.label.toLowerCase().includes(clean) &&
@@ -274,6 +337,12 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const removed = before - manifest.recipients.length;
+    const kept = new Set(manifest.recipients.map((r) => r.fingerprint));
+    const revokedNow = new Date().toISOString();
+    manifest.revoked = mergeRevoked(
+      manifest.revoked,
+      beforeFps.filter((fp) => !kept.has(fp)).map((fingerprint) => ({ fingerprint, at: revokedNow }))
+    );
     saveManifest(repoRoot, manifest);
     const commitRes = commitToGitRef(repoRoot);
     console.log(`✔ Revoked ${removed} key(s) matching "${query}". Rotated encryption keys on ${LORE_REF} (${commitRes.commitSha.slice(0, 8)}).`);
@@ -376,8 +445,79 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cmd === 'forget') {
+    const repoRoot = requireRepoRoot();
+    const targets = args.slice(1).filter((a) => !a.startsWith('--'));
+    if (args.includes('--check')) {
+      const suspects = findMisfiledSessions(repoRoot);
+      if (suspects.length === 0) {
+        console.log('✔ Every session from this device still belongs to this repo.');
+        return;
+      }
+      console.log(`${suspects.length} session(s) from this device no longer match this repo`);
+      console.log('(filed here by an older lore version, or their original transcript was deleted):\n');
+      for (const s of suspects) {
+        console.log(`  [${s.id.slice(0, 8)}] ${s.title} (${s.source} · ${s.updatedAt.slice(0, 10)} · ${s.turns.length} turns)`);
+      }
+      console.log(`\nTo remove them: lore forget ${suspects.map((s) => s.id.slice(0, 8)).join(' ')}`);
+      return;
+    }
+    if (targets.length === 0) {
+      console.error('Usage: lore forget <session-or-takeaway-id> [...]   |   lore forget --check');
+      process.exit(1);
+    }
+    const sessions = loadAllLocalSessions(repoRoot);
+    const takeaways = loadTakeaways(repoRoot);
+    const items: Array<{ id: string; kind: 'session' | 'takeaway'; label: string }> = [];
+    for (const raw of targets) {
+      const q = raw.toLowerCase();
+      const matches = [
+        ...sessions
+          .filter((s) => s.id.toLowerCase().startsWith(q))
+          .map((s) => ({ id: s.id, kind: 'session' as const, label: `session: ${s.title}` })),
+        ...takeaways
+          .filter((t) => t.id.toLowerCase().startsWith(q))
+          .map((t) => ({
+            id: t.id,
+            kind: 'takeaway' as const,
+            label: `takeaway: ${t.content.split(/\r?\n/)[0].slice(0, 60)}`,
+          })),
+      ];
+      const exact = matches.filter((m) => m.id.toLowerCase() === q);
+      const chosen = exact.length === 1 ? exact : matches;
+      if (chosen.length === 0) {
+        console.error(`✖ Nothing matches "${raw}".`);
+        process.exit(1);
+      }
+      if (chosen.length > 1) {
+        console.error(`✖ "${raw}" matches ${chosen.length} items; use a longer id:`);
+        for (const m of chosen) console.error(`    ${m.id}  (${m.label})`);
+        process.exit(1);
+      }
+      items.push(chosen[0]);
+    }
+    forgetItems(repoRoot, items, getGitMeta(repoRoot).author);
+    const commitRes = commitToGitRef(repoRoot);
+    refreshWorkspaceContextFiles(repoRoot);
+    for (const i of items) console.log(`✔ Forgot ${i.label}`);
+    console.log(`  Recorded in ${LORE_REF} (${commitRes.commitSha.slice(0, 8)}); other devices drop it on their next sync.`);
+    console.log(`  Run 'lore sync' to push now, and 'lore compact' to also purge it from the ref's history.`);
+    return;
+  }
+
+  if (cmd === 'compact') {
+    const repoRoot = requireRepoRoot();
+    const res = withProgress('Rewriting refs/ai/lore without history', () => compactLoreRef(repoRoot));
+    console.log(`✔ Compacted ${LORE_REF} from ${res.commitsBefore} commit(s) to 1 (${res.commitSha.slice(0, 8)})`);
+    console.log(`  • Remote             : ${res.pushed ? 'replaced on origin' : 'local only'}`);
+    if (res.error) console.log(`    ⚠ ${res.error.split(/\r?\n/)[0]}`);
+    console.log('  Note: copies other machines already fetched keep the old history until they sync.');
+    return;
+  }
+
   if (cmd === 'status') {
     const repoRoot = requireRepoRoot();
+    healStaleHooks(repoRoot);
     const { ruleRes, manifest, sessions, takeaways, refSha, remoteRefSha, hasOrigin } = withProgress(
       'Scanning local AI sessions & project memory',
       () => {
@@ -405,9 +545,17 @@ async function main(): Promise<void> {
       `  • Synced Sessions    : ${sessions.length} (${formatKB(totalRaw)} raw → ${formatKB(totalStripped)} stripped, ${savingsPct}% noise removed)`
     );
     console.log(`  • Active Takeaways   : ${takeaways.length}`);
+    for (const t of takeaways.slice(-8)) {
+      console.log(`      - [${t.id.slice(0, 12)}] ${t.category}: ${t.content.split(/\r?\n/)[0].slice(0, 70)}`);
+    }
     console.log(`  • Authorized Keys    : ${manifest.recipients.length}`);
     for (const r of manifest.recipients) {
       console.log(`      - ${r.label} (${r.fingerprint})`);
+    }
+
+    const lastHook = readLastHookEntry(repoRoot);
+    if (lastHook) {
+      console.log(`  • Last Git Hook      : ${lastHook.failed ? '⚠ FAILED — ' : ''}${lastHook.line.slice(0, 160)}`);
     }
 
     if (sessions.length > 0) {

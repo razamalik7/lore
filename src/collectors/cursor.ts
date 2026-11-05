@@ -129,7 +129,7 @@ export function collectCursorSessions(
                 if (text) {
                   turns.push({
                     role,
-                    timestamp: new Date(msg.timingInfo?.clientStartTime || comp.lastUpdatedAt || Date.now()).toISOString(),
+                    timestamp: new Date(msg.timingInfo?.clientStartTime || comp.lastUpdatedAt || comp.createdAt || 0).toISOString(),
                     text,
                   });
                 }
@@ -137,7 +137,7 @@ export function collectCursorSessions(
               if (turns.length === 0) continue;
               const id = comp.composerId || comp.id || `cursor-${entry.name}`;
               const title = comp.name || turns[0].text.split(/\r?\n/)[0].slice(0, 72);
-              const updatedAt = new Date(comp.lastUpdatedAt || Date.now()).toISOString();
+              const updatedAt = new Date(comp.lastUpdatedAt || comp.createdAt || 0).toISOString();
               const record: SessionRecord = {
                 id,
                 source: 'cursor',

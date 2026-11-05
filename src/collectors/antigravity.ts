@@ -42,16 +42,23 @@ export function getEncodedRepoSlugs(repoRoot: string): string[] {
   const cleaned = repoRoot.trim().replace(/[\\/]+$/, '');
   const slugCollapsed = cleaned.replace(/[:\\/ ]+/g, '-').toLowerCase();
   const slugExact = cleaned.replace(/[:\\/ ]/g, '-').toLowerCase();
-  return Array.from(new Set([slugExact, slugCollapsed].filter(Boolean)));
+  // Claude Code replaces every non-alphanumeric character (including `.` and `_`) with `-`
+  const slugAlnum = cleaned.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+  return Array.from(new Set([slugExact, slugCollapsed, slugAlnum].filter(Boolean)));
 }
 
+/**
+ * True when a tool's project folder name is this repo, or a worktree of it.
+ * Worktree folders look like `<slug>--claude-worktrees-<name>` (or `<slug>-claude-worktrees-<name>`
+ * in collapsed form). A plain prefix match is not enough: `projects-lore` must not match `projects-lore-site`.
+ */
 export function matchesRepoSlug(dirOrPathSlug: string, repoRoot: string): boolean {
   const target = dirOrPathSlug.toLowerCase();
   for (const slug of getEncodedRepoSlugs(repoRoot)) {
     if (
       target === slug ||
       target.startsWith(`${slug}--`) ||
-      target.startsWith(slug)
+      target.startsWith(`${slug}-claude-worktrees-`)
     ) {
       return true;
     }
@@ -63,6 +70,26 @@ export function isSameOrSubPath(targetPath: string, repoRoot: string): boolean {
   const normTarget = normalizeFsPath(targetPath);
   const normRepo = normalizeFsPath(repoRoot);
   return normTarget === normRepo || normTarget.startsWith(`${normRepo}/`);
+}
+
+/** Path-valued tool arguments Antigravity uses for file reads/edits and command working folders. */
+const AGY_PATH_ARGS = ['TargetFile', 'AbsolutePath', 'Path', 'Cwd'];
+
+/**
+ * True when an Antigravity log step actually worked inside the repo:
+ * read/edited a file there or ran a command with its working folder there.
+ * Mere mentions of the path (e.g. in command output) do not count.
+ */
+function agyStepTouchesRepo(step: any, repoRoot: string): boolean {
+  if (step?.type !== 'PLANNER_RESPONSE' || !Array.isArray(step.tool_calls)) return false;
+  for (const tc of step.tool_calls) {
+    const args = tc?.args || {};
+    for (const key of AGY_PATH_ARGS) {
+      const p = unquoteJsonArg(args[key]);
+      if (p && isSameOrSubPath(p, repoRoot)) return true;
+    }
+  }
+  return false;
 }
 
 function cleanUserPrompt(raw: string): string {
@@ -124,9 +151,10 @@ export function buildAutoRecap(title: string, turns: CompactTurn[], filesTouched
  */
 export function collectAntigravitySessions(
   repoRoot: string,
-  metaContext: { branch?: string; headCommit?: string; author?: string }
+  metaContext: { branch?: string; headCommit?: string; author?: string },
+  customAgyRoot?: string
 ): SessionRecord[] {
-  const agyRoot = path.join(os.homedir(), '.gemini', 'antigravity');
+  const agyRoot = customAgyRoot || path.join(os.homedir(), '.gemini', 'antigravity');
   const dbPath = path.join(agyRoot, 'conversation_summaries.db');
   const brainDir = path.join(agyRoot, 'brain');
 
@@ -139,6 +167,7 @@ export function collectAntigravitySessions(
     { title: string; updatedAt: string; stepCount: number }
   >();
   const dbTitles = new Map<string, { title: string; updatedAt: string; stepCount: number }>();
+  const dbWorkspaces = new Map<string, string[]>();
 
   // 1. Query conversation_summaries.db if present
   if (fs.existsSync(dbPath)) {
@@ -162,12 +191,13 @@ export function collectAntigravitySessions(
       for (const row of rows) {
         const meta = {
           title: row.title || '',
-          updatedAt: row.last_modified_time || new Date().toISOString(),
+          updatedAt: row.last_modified_time || '',
           stepCount: Number(row.step_count || 0),
         };
         dbTitles.set(row.conversation_id, meta);
         try {
           const uris: string[] = JSON.parse(row.workspace_uris || '[]');
+          dbWorkspaces.set(row.conversation_id, uris);
           const matchesRepo = uris.some((u) => isSameOrSubPath(u, repoRoot));
           if (matchesRepo) {
             matchedConvs.set(row.conversation_id, meta);
@@ -182,17 +212,36 @@ export function collectAntigravitySessions(
     }
   }
 
-  // 2. Also scan brain/* for sessions that touched files inside repoRoot (e.g. parent workspace)
+  // 2. Fallback for conversations whose workspace is a *parent* folder of the repo (e.g. ~/Projects),
+  //    or that have no workspace recorded. Include them only if they actually read/edited files
+  //    or ran commands inside the repo. Conversations rooted in some other folder are never included,
+  //    even if their logs mention this repo's path (e.g. in command output).
   try {
     const entries = fs.readdirSync(brainDir, { withFileTypes: true });
-    const normRepo = normalizeFsPath(repoRoot);
     for (const entry of entries) {
       if (!entry.isDirectory() || matchedConvs.has(entry.name)) continue;
+      const workspaces = dbWorkspaces.get(entry.name);
+      if (workspaces && workspaces.length > 0) {
+        const isParentWorkspace = workspaces.some((u) => isSameOrSubPath(repoRoot, u));
+        if (!isParentWorkspace) continue;
+      }
       const transcriptPath = path.join(brainDir, entry.name, '.system_generated', 'logs', 'transcript.jsonl');
       if (!fs.existsSync(transcriptPath)) continue;
       const stat = fs.statSync(transcriptPath);
       const raw = fs.readFileSync(transcriptPath, 'utf8');
-      if (normalizeFsPath(raw).includes(normRepo)) {
+      let touches = false;
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.includes('tool_calls')) continue;
+        try {
+          if (agyStepTouchesRepo(JSON.parse(line), repoRoot)) {
+            touches = true;
+            break;
+          }
+        } catch {
+          // Ignore malformed line
+        }
+      }
+      if (touches) {
         const dbMeta = dbTitles.get(entry.name);
         matchedConvs.set(entry.name, {
           title: dbMeta?.title || '',
@@ -219,7 +268,7 @@ export function collectAntigravitySessions(
     const turns: CompactTurn[] = [];
     const filesSet = new Set<string>();
     let createdAt = '';
-    let updatedAt = summaryMeta.updatedAt;
+    let updatedAt = summaryMeta.updatedAt || fs.statSync(transcriptPath).mtime.toISOString();
     let pendingTools: string[] = [];
     let pendingFiles: string[] = [];
 
@@ -254,7 +303,7 @@ export function collectAntigravitySessions(
             const summary = unquoteJsonArg(args.toolSummary) || unquoteJsonArg(args.toolAction) || tc.name;
             if (summary) pendingTools.push(`${tc.name}: ${summary}`);
 
-            const rawFile = unquoteJsonArg(args.TargetFile) || unquoteJsonArg(args.AbsolutePath);
+            const rawFile = unquoteJsonArg(args.TargetFile) || unquoteJsonArg(args.AbsolutePath) || unquoteJsonArg(args.Path);
             if (rawFile && isSameOrSubPath(rawFile, repoRoot)) {
               const rel = path.relative(repoRoot, rawFile).replace(/\\/g, '/');
               if (rel && !rel.startsWith('..')) {
