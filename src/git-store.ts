@@ -321,7 +321,11 @@ export function saveLocalSession(repoRoot: string, session: SessionRecord): bool
     headCommit: existing?.headCommit ?? session.headCommit,
     title: redactSecrets(session.title),
     recap: redactSecrets(session.recap),
-    turns: session.turns.map((t) => ({ ...t, text: redactSecrets(t.text) })),
+    turns: session.turns.map((t) => ({
+      ...t,
+      text: redactSecrets(t.text),
+      ...(t.toolOutputs ? { toolOutputs: t.toolOutputs.map((o) => redactSecrets(o)) } : {}),
+    })),
   };
   scrubbed.compressedBytes = Buffer.byteLength(JSON.stringify({ ...scrubbed, compressedBytes: 0 }), 'utf8');
   writeFileIfChanged(filePath, JSON.stringify(scrubbed, null, 2));
@@ -459,11 +463,50 @@ function existingBlobs(repoRoot: string, shas: string[]): Set<string> {
 // Reading the ref
 // ---------------------------------------------------------------------------
 
-export const LORE_FORMAT = 1;
+/**
+ * Data layout version written by this client.
+ * 1: one encrypted blob per session at `sessions/<id>.enc` (v0.1.x).
+ * 2: each session split into `s2/<id>/meta.enc` (everything but turns) plus fixed-size turn chunks
+ *    `s2/<id>/c0000.enc`, `c0001.enc`, ... so a growing session only rewrites its last chunk.
+ *    Format-1 refs are still read; they're migrated to format 2 on the next write.
+ */
+export const LORE_FORMAT = 2;
+export const TURNS_PER_CHUNK = 50;
+
+const LEGACY_SESSION_PATH = /^sessions\/[^/]+\.enc$/;
+const S2_PATH = /^s2\/([^/]+)\/(meta|c(\d{4,}))\.enc$/;
 
 /** Paths this client owns in the ref tree. Anything else was written by a newer client and is carried over untouched. */
 function isKnownTreePath(p: string): boolean {
-  return p === 'manifest.json' || p === 'takeaways.enc' || /^sessions\/[^/]+\.enc$/.test(p);
+  return p === 'manifest.json' || p === 'takeaways.enc' || LEGACY_SESSION_PATH.test(p) || S2_PATH.test(p);
+}
+
+interface SessionMetaPayload extends Omit<SessionRecord, 'turns'> {
+  turnCount: number;
+  chunkCount: number;
+  turnsPerChunk: number;
+}
+
+interface SessionChunkPayload {
+  sessionId: string;
+  index: number;
+  turns: SessionRecord['turns'];
+}
+
+function splitSession(session: SessionRecord): { meta: SessionMetaPayload; chunks: SessionChunkPayload[] } {
+  const { turns, ...rest } = session;
+  const chunks: SessionChunkPayload[] = [];
+  for (let i = 0; i * TURNS_PER_CHUNK < turns.length; i++) {
+    chunks.push({ sessionId: session.id, index: i, turns: turns.slice(i * TURNS_PER_CHUNK, (i + 1) * TURNS_PER_CHUNK) });
+  }
+  return {
+    meta: { ...rest, turnCount: turns.length, chunkCount: chunks.length, turnsPerChunk: TURNS_PER_CHUNK },
+    chunks,
+  };
+}
+
+function chunkFileName(index: number): string {
+  return `c${String(index).padStart(4, '0')}.enc`;
 }
 
 function readRefFormat(repoRoot: string, commitSha: string): number {
@@ -580,16 +623,51 @@ export function importFromGitRef(repoRoot: string, refName = LORE_REF): {
     }
   }
 
-  // 3. Sessions
-  for (const entry of tree.filter((e) => /^sessions\/[^/]+\.enc$/.test(e.path))) {
+  const decryptBlob = <T>(entry: { path: string; sha: string }): T => {
     const rawEnv = tryGit(repoRoot, ['cat-file', 'blob', entry.sha]);
-    if (!rawEnv) continue;
+    if (!rawEnv) throw new Error(`Missing blob for ${entry.path}`);
+    const env = JSON.parse(rawEnv) as EncryptedEnvelope;
+    const payload = JSON.parse(decryptWithLocalIdentity(env)) as T;
+    cache.entries[entry.path] = { key: payloadKey(payload, env.wraps.map((w) => w.fp)), blob: entry.sha };
+    return payload;
+  };
+
+  // 3a. Format-1 sessions (one blob each)
+  for (const entry of tree.filter((e) => LEGACY_SESSION_PATH.test(e.path))) {
     try {
-      const env = JSON.parse(rawEnv) as EncryptedEnvelope;
-      const decrypted = decryptWithLocalIdentity(env);
-      const session = JSON.parse(decrypted) as SessionRecord;
+      const session = decryptBlob<SessionRecord>(entry);
       if (saveLocalSession(repoRoot, session)) importedSessions++;
-      cache.entries[entry.path] = { key: payloadKey(session, env.wraps.map((w) => w.fp)), blob: entry.sha };
+    } catch (err: any) {
+      decryptionError = err.message;
+    }
+  }
+
+  // 3b. Format-2 sessions (meta + turn chunks)
+  const s2 = new Map<string, { meta?: { path: string; sha: string }; chunks: Map<number, { path: string; sha: string }> }>();
+  for (const entry of tree) {
+    const m = entry.path.match(S2_PATH);
+    if (!m) continue;
+    const group = s2.get(m[1]) ?? { meta: undefined, chunks: new Map<number, { path: string; sha: string }>() };
+    if (m[2] === 'meta') group.meta = entry;
+    else group.chunks.set(Number(m[3]), entry);
+    s2.set(m[1], group);
+  }
+  for (const [dirId, group] of s2) {
+    try {
+      if (!group.meta) throw new Error(`Session ${dirId} has turn chunks but no meta.enc`);
+      const meta = decryptBlob<SessionMetaPayload>(group.meta);
+      const turns: SessionRecord['turns'] = [];
+      for (let i = 0; i < meta.chunkCount; i++) {
+        const chunkEntry = group.chunks.get(i);
+        if (!chunkEntry) throw new Error(`Session ${meta.id} is missing turn chunk ${i}`);
+        const chunk = decryptBlob<SessionChunkPayload>(chunkEntry);
+        turns.push(...chunk.turns);
+      }
+      const { turnCount, chunkCount, turnsPerChunk, ...rest } = meta;
+      void chunkCount;
+      void turnsPerChunk;
+      if (turns.length !== turnCount) throw new Error(`Session ${meta.id} has ${turns.length} turns, expected ${turnCount}`);
+      if (saveLocalSession(repoRoot, { ...rest, turns } as SessionRecord)) importedSessions++;
     } catch (err: any) {
       decryptionError = err.message;
     }
@@ -701,13 +779,22 @@ export function commitToGitRef(
   // 2. Encrypted takeaways + session catalog + tombstones
   addEncrypted('takeaways.enc', { takeaways, indexMeta, tombstones });
 
-  // 3. Each session as its own encrypted blob
+  // 3. Each session as a small meta blob plus fixed-size turn chunks (format 2).
+  //    Format-1 `sessions/*.enc` files from older refs are not carried over: their data was imported above.
   const writtenPaths = new Set(['manifest.json', 'takeaways.enc']);
+  const writtenSessionDirs = new Set<string>();
   for (const session of sessions) {
-    const p = `sessions/${safeSessionFileId(session.id)}.enc`;
-    if (writtenPaths.has(p)) continue;
-    writtenPaths.add(p);
-    addEncrypted(p, session);
+    const dir = `s2/${safeSessionFileId(session.id)}`;
+    if (writtenSessionDirs.has(dir)) continue;
+    writtenSessionDirs.add(dir);
+    const { meta, chunks } = splitSession(session);
+    writtenPaths.add(`${dir}/meta.enc`);
+    addEncrypted(`${dir}/meta.enc`, meta);
+    for (const chunk of chunks) {
+      const p = `${dir}/${chunkFileName(chunk.index)}`;
+      writtenPaths.add(p);
+      addEncrypted(p, chunk);
+    }
   }
 
   // 4. Carry over files written by newer clients that this version doesn't understand

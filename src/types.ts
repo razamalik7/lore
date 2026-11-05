@@ -4,6 +4,8 @@ export interface CompactTurn {
   text: string;
   toolsUsed?: string[];
   filesTouched?: string[];
+  /** Short, redacted snippets of command output and tool errors (the evidence behind the reply). */
+  toolOutputs?: string[];
 }
 
 export interface SessionRecord {

@@ -4,11 +4,16 @@ import os from 'node:os';
 import type { CompactTurn, SessionRecord, TakeawayEntry } from '../types.js';
 import {
   buildAutoRecap,
+  clipOutput,
+  MAX_TOOL_OUTPUTS_PER_TURN,
   getEncodedRepoSlugs,
   isSameOrSubPath,
   matchesRepoSlug,
   normalizeFsPath,
 } from './antigravity.js';
+
+/** Tools whose results are evidence worth keeping (command output). Errors from any tool are kept too. */
+const EVIDENCE_TOOLS = new Set(['Bash', 'PowerShell', 'BashOutput']);
 
 /**
  * Collect and deterministically compress Claude Code sessions (`~/.claude/projects/*`) for a given repository path.
@@ -59,6 +64,8 @@ export function collectClaudeCodeSessions(
     const filesSet = new Set<string>();
     let pendingTools: string[] = [];
     let pendingFiles: string[] = [];
+    let pendingOutputs: string[] = [];
+    const toolNamesById = new Map<string, string>();
     let matchedCwd = false;
 
     for (const line of lines) {
@@ -88,6 +95,21 @@ export function collectClaudeCodeSessions(
       } else if (entry.type === 'user' && entry.message?.content) {
         const content = entry.message.content;
         let text = '';
+        if (Array.isArray(content)) {
+          for (const b of content) {
+            if (b?.type !== 'tool_result' || pendingOutputs.length >= MAX_TOOL_OUTPUTS_PER_TURN) continue;
+            const toolName = toolNamesById.get(b.tool_use_id) || '';
+            // Keep command output and errors; skip file reads/edits (their result is the file itself)
+            if (!b.is_error && !EVIDENCE_TOOLS.has(toolName)) continue;
+            const raw =
+              typeof b.content === 'string'
+                ? b.content
+                : Array.isArray(b.content)
+                  ? b.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
+                  : '';
+            if (raw.trim()) pendingOutputs.push(clipOutput(`${b.is_error ? 'error' : toolName}: ${raw}`));
+          }
+        }
         if (typeof content === 'string') {
           text = content.trim();
         } else if (Array.isArray(content)) {
@@ -111,6 +133,7 @@ export function collectClaudeCodeSessions(
             textBlocks.push(block.text.trim());
           } else if (block.type === 'tool_use') {
             const name = block.name || 'tool';
+            if (block.id) toolNamesById.set(block.id, name);
             const input = block.input || {};
             const desc = input.description || input.command || input.file_path || input.path || '';
             pendingTools.push(desc ? `${name}: ${String(desc).slice(0, 60)}` : name);
@@ -133,9 +156,11 @@ export function collectClaudeCodeSessions(
             text: textBlocks.join('\n\n'),
             toolsUsed: pendingTools.length > 0 ? Array.from(new Set(pendingTools)) : undefined,
             filesTouched: pendingFiles.length > 0 ? Array.from(new Set(pendingFiles)) : undefined,
+            toolOutputs: pendingOutputs.length > 0 ? pendingOutputs : undefined,
           });
           pendingTools = [];
           pendingFiles = [];
+          pendingOutputs = [];
         }
       }
     }

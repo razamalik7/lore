@@ -99,11 +99,16 @@ You can run commands as either `lore <cmd>` or native Git subcommand `git lore <
 | `lore note "<text>"` | Save an architectural decision, gotcha, convention, or WIP note (`--cat decision\|architecture\|gotcha\|wip\|convention`) |
 | `lore search <query>` | Instant SQLite FTS5 BM25 search across all past sessions and takeaways |
 | `lore show <session-id>` | Read the stripped User/Assistant conversation turns of a session in your terminal |
+| `lore show <id> --outline` | One line per user prompt with its turn number, to find the part of a long session that matters |
+| `lore show <id> --last N` / `--from A --to B` | Read only a stretch of turns (search results list matching turn numbers) |
+| `lore handoff` | Show recent work from another tool in this repo; `lore setup --handoff` makes Claude Code sessions start with it |
 | `lore forget <id> [...]` | Delete sessions or takeaways by id/prefix on every device (recorded as tombstones so merges don't bring them back) |
 | `lore forget --check` | List sessions from this device that no longer belong to this repo (e.g. filed here by older versions) |
 | `lore compact` | Rewrite `refs/ai/lore` as a single commit, purging old history (including forgotten or revoked data) from the remote |
 
 > **Upgrading:** lore data written by one version must be readable by every device that syncs the repo. After upgrading lore on one machine, upgrade the others too (`npm i -g git-lore-cli@latest && lore setup`).
+>
+> **v0.2 changes the stored format** (sessions are split into turn chunks so growing sessions don't re-store everything). v0.1.5 detects the new format and refuses to write it, asking you to upgrade. **v0.1.4 and earlier don't, and their next sync would drop data in the new format**, so upgrade every machine to at least v0.1.5 before any machine runs v0.2.
 
 ---
 
@@ -112,7 +117,7 @@ You can run commands as either `lore <cmd>` or native Git subcommand `git lore <
 Once `lore setup` is run, your AI agents automatically have access to:
 *   `lore_status` — View the repo's Living Digest, recent cross-device sessions, and authorized contributors.
 *   `lore_search` — Full-text BM25 search across all past transcripts and takeaways in the repo (0 token cost until searched).
-*   `lore_get_session` — Retrieve the verbatim User/Assistant dialogue of any past session by ID or prefix.
+*   `lore_get_session` — Retrieve the User/Assistant dialogue of a past session by ID or prefix. Long sessions return an outline plus the last 20 turns; pass `outline`, `last`, or `from`/`to` to read a specific stretch.
 *   `lore_save_takeaway` — Record an architectural decision, gotcha, or WIP handoff note into the Living Digest.
 *   `lore_sync` — Pull and push encrypted context via `refs/ai/lore`.
 

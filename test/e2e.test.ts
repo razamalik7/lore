@@ -41,6 +41,10 @@ import {
 } from '../src/collectors/claude.js';
 import { collectAntigravitySessions, matchesRepoSlug } from '../src/collectors/antigravity.js';
 import type { SessionRecord } from '../src/types.js';
+import { renderOutline, renderSessionMarkdown, resolveTurnRange } from '../src/session-view.js';
+import { buildHandoff } from '../src/handoff.js';
+import { applyHandoffHook } from '../src/global-setup.js';
+import { CLAUDE_MD_BLOCK, upsertMarkedBlock } from '../src/agent-instructions.js';
 
 function makeSession(id: string, title: string, text: string): SessionRecord {
   return {
@@ -121,8 +125,8 @@ async function runV015Tests(ctx: {
   saveLocalSession(desktopRepo, makeSession('desktop-session-002', 'Add rate limiting', 'Added a token bucket limiter.'));
   pushLoreToRemote(desktopRepo, 'origin');
   const blobsAfterOne = blobCount(remoteBare, LORE_REF);
-  // One new session blob, plus a new catalog blob (takeaways.enc lists sessions)
-  assert.equal(blobsAfterOne - blobsBefore, 2, `Adding one session should add exactly 2 blobs (got ${blobsAfterOne - blobsBefore})`);
+  // One new session = its meta blob + one turn chunk, plus a new catalog blob (takeaways.enc lists sessions)
+  assert.equal(blobsAfterOne - blobsBefore, 3, `Adding one session should add exactly 3 blobs (got ${blobsAfterOne - blobsBefore})`);
   console.log('   ✔ No-op syncs add nothing; one new session adds only its own blob plus the catalog.');
 
   console.log('6. Testing concurrent pushes merge instead of force-overwriting...');
@@ -140,8 +144,8 @@ async function runV015Tests(ctx: {
     'Desktop\'s pushed commit must remain in remote history (fast-forward, not overwrite)'
   );
   const paths6 = treePaths(remoteBare, LORE_REF);
-  assert.ok(paths6.includes('sessions/desktop-session-003.enc'), 'Remote keeps desktop session');
-  assert.ok(paths6.includes('sessions/laptop-session-001.enc'), 'Remote has laptop session');
+  assert.ok(paths6.includes('s2/desktop-session-003/meta.enc'), 'Remote keeps desktop session');
+  assert.ok(paths6.includes('s2/laptop-session-001/meta.enc'), 'Remote has laptop session');
   console.log('   ✔ Racing devices both land their sessions with fast-forward pushes.');
 
   console.log('7. Testing files from newer lore versions are kept, and newer formats are refused...');
@@ -191,7 +195,7 @@ async function runV015Tests(ctx: {
   ]);
   assert.ok(!loadTakeaways(desktopRepo).some((t) => t.id === 'takeaway-001'), 'Forgotten takeaway stays gone');
   pushLoreToRemote(desktopRepo, 'origin');
-  assert.ok(!treePaths(remoteBare, LORE_REF).includes('sessions/desktop-session-002.enc'), 'Remote no longer holds it');
+  assert.ok(!treePaths(remoteBare, LORE_REF).some((p) => p.startsWith('s2/desktop-session-002/')), 'Remote no longer holds it');
   console.log('   ✔ Forgotten items disappear everywhere and stay gone.');
 
   console.log('9. Testing repo scoping for Antigravity conversations and project folder names...');
@@ -257,12 +261,12 @@ async function runV015Tests(ctx: {
   console.log('10. Testing compact rewrites history and stays compacted after other devices sync...');
   const commitsBefore = Number(runGit(remoteBare, ['rev-list', '--count', LORE_REF]));
   assert.ok(commitsBefore > 2, 'Remote should have history before compaction');
-  const sessionsBefore = treePaths(remoteBare, LORE_REF).filter((p) => p.startsWith('sessions/')).length;
+  const sessionsBefore = treePaths(remoteBare, LORE_REF).filter((p) => p.endsWith('/meta.enc')).length;
   const compacted = compactLoreRef(desktopRepo, 'origin');
   assert.equal(compacted.pushed, true, `Compact should replace the remote (${compacted.error ?? ''})`);
   assert.equal(runGit(remoteBare, ['rev-list', '--count', LORE_REF]), '1');
   assert.equal(
-    treePaths(remoteBare, LORE_REF).filter((p) => p.startsWith('sessions/')).length,
+    treePaths(remoteBare, LORE_REF).filter((p) => p.endsWith('/meta.enc')).length,
     sessionsBefore,
     'Compaction must keep all current sessions'
   );
@@ -295,7 +299,7 @@ async function runV015Tests(ctx: {
   assert.equal(pushLoreToRemote(laptopRepo, 'origin').pushed, true);
   const remoteManifest = JSON.parse(runGit(remoteBare, ['show', `${LORE_REF}:manifest.json`]));
   assert.ok(!remoteManifest.recipients.some((r: any) => r.fingerprint === bob.fingerprint), 'Bob stays revoked on the remote');
-  const latestSession = runGit(remoteBare, ['show', `${LORE_REF}:sessions/desktop-session-004.enc`]);
+  const latestSession = runGit(remoteBare, ['show', `${LORE_REF}:s2/desktop-session-004/meta.enc`]);
   assert.throws(() => decryptWithLocalIdentity(JSON.parse(latestSession), bob), /Access denied/, 'Bob cannot read new data');
   console.log('   ✔ Revoked keys stay revoked across devices and lose access to current data.');
 }
@@ -538,9 +542,155 @@ async function runTests() {
   console.log('   ✔ MCP Server (initialize, lore_search, lore_get_session) passed.');
 
   await runV015Tests({ tmpRoot, remoteBare, desktopRepo, laptopRepo, branch });
+  await runV02Tests({ tmpRoot, remoteBare, desktopRepo, laptopRepo });
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
   console.log('\nALL E2E TESTS PASSED!');
+}
+
+function longSession(id: string, turnCount: number): SessionRecord {
+  const turns: SessionRecord['turns'] = [];
+  for (let i = 0; i < turnCount; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant';
+    turns.push({
+      role,
+      timestamp: new Date(Date.UTC(2026, 10, 1, 10, 0, i)).toISOString(),
+      text: role === 'user' ? `Prompt number ${i + 1} about topic ${i}` : `Reply number ${i + 1}`,
+    });
+  }
+  return { ...makeSession(id, `Long session ${id}`, 'x'), turns, rawStepCount: turnCount };
+}
+
+async function runV02Tests(ctx: { tmpRoot: string; remoteBare: string; desktopRepo: string; laptopRepo: string }) {
+  const { tmpRoot, remoteBare, desktopRepo, laptopRepo } = ctx;
+
+  console.log('12. Testing chunked sessions: a growing session only rewrites its last chunk...');
+  pullLoreFromRemote(desktopRepo, 'origin');
+  const big = longSession('big-session', 120);
+  saveLocalSession(desktopRepo, big);
+  assert.equal(pushLoreToRemote(desktopRepo, 'origin').pushed, true);
+  const bigPaths = treePaths(remoteBare, LORE_REF).filter((p) => p.startsWith('s2/big-session/')).sort();
+  assert.deepEqual(bigPaths, ['s2/big-session/c0000.enc', 's2/big-session/c0001.enc', 's2/big-session/c0002.enc', 's2/big-session/meta.enc']);
+  const manifest12 = JSON.parse(runGit(remoteBare, ['show', `${LORE_REF}:manifest.json`]));
+  assert.equal(manifest12.format, 2, 'Manifest should declare format 2');
+  const blobs12 = blobCount(remoteBare, LORE_REF);
+  const grown = { ...big, turns: [...big.turns, { role: 'user' as const, timestamp: '2026-11-01T11:00:00Z', text: 'One more prompt' }], updatedAt: '2026-11-01T11:00:00Z' };
+  saveLocalSession(desktopRepo, grown);
+  assert.equal(pushLoreToRemote(desktopRepo, 'origin').pushed, true);
+  assert.equal(blobCount(remoteBare, LORE_REF) - blobs12, 3, 'Growth should add only meta + last chunk + catalog');
+  pullLoreFromRemote(laptopRepo, 'origin');
+  const onLaptop = loadAllLocalSessions(laptopRepo).find((s) => s.id === 'big-session');
+  assert.ok(onLaptop, 'Laptop should reassemble the chunked session');
+  assert.equal(onLaptop!.turns.length, 121);
+  assert.equal(onLaptop!.turns[120].text, 'One more prompt');
+  console.log('   ✔ Sessions round-trip through chunks; growth touches only the last chunk.');
+
+  console.log('13. Testing format-1 refs are read and migrated to format 2...');
+  const legacyRemote = path.join(tmpRoot, 'legacy.git');
+  const legacyRepo = path.join(tmpRoot, 'legacy-repo');
+  fs.mkdirSync(legacyRemote, { recursive: true });
+  runGit(legacyRemote, ['init', '--bare']);
+  fs.mkdirSync(legacyRepo, { recursive: true });
+  runGit(legacyRepo, ['init']);
+  runGit(legacyRepo, ['config', 'user.name', 'Legacy']);
+  runGit(legacyRepo, ['config', 'user.email', 'legacy@example.com']);
+  runGit(legacyRepo, ['remote', 'add', 'origin', legacyRemote]);
+  const me = ensureLocalIdentity();
+  const recipients = [{ label: me.label, sshPublicKey: me.pubLine, fingerprint: me.fingerprint, addedAt: '2026-01-01T00:00:00Z' }];
+  const legacySession = makeSession('legacy-session', 'Written by v0.1.x', 'Old format reply.');
+  const idx = path.join(legacyRepo, '.git', 'legacy.index');
+  const env = { GIT_INDEX_FILE: idx };
+  const put = (p: string, content: string) => {
+    const sha = runGit(legacyRepo, ['hash-object', '-w', '--stdin'], undefined, content);
+    runGit(legacyRepo, ['update-index', '--add', '--cacheinfo', `100644,${sha},${p}`], env);
+  };
+  put('manifest.json', JSON.stringify({ version: 1, updatedAt: '2026-01-01T00:00:00Z', encryption: 'ssh-x25519-aes256gcm', recipients }));
+  put('takeaways.enc', JSON.stringify(encryptForRecipients(JSON.stringify({ takeaways: [], indexMeta: [] }), recipients)));
+  put('sessions/legacy-session.enc', JSON.stringify(encryptForRecipients(JSON.stringify(legacySession), recipients)));
+  const legacyTree = runGit(legacyRepo, ['write-tree'], env);
+  fs.rmSync(idx, { force: true });
+  const legacyCommit = runGit(legacyRepo, ['commit-tree', legacyTree, '-m', 'v0.1 lore']);
+  runGit(legacyRepo, ['push', 'origin', `${legacyCommit}:${LORE_REF}`]);
+  assert.equal(pushLoreToRemote(legacyRepo, 'origin').pushed, true);
+  assert.ok(loadAllLocalSessions(legacyRepo).some((s) => s.id === 'legacy-session'), 'Format-1 session imported');
+  const migrated = treePaths(legacyRemote, LORE_REF);
+  assert.ok(migrated.includes('s2/legacy-session/meta.enc'), 'Session rewritten in format 2');
+  assert.ok(!migrated.some((p) => p.startsWith('sessions/')), 'Format-1 files removed after migration');
+  console.log('   ✔ v0.1.x data is imported and migrated.');
+
+  console.log('14. Testing turn ranges, outlines, and long-session defaults...');
+  assert.deepEqual(resolveTurnRange(100, { last: 10 }), { from: 91, to: 100 });
+  assert.deepEqual(resolveTurnRange(100, { from: 40, to: 45 }), { from: 40, to: 45 });
+  assert.deepEqual(resolveTurnRange(100, { from: 95, to: 500 }), { from: 95, to: 100 });
+  const outline = renderOutline(big);
+  assert.ok(outline.startsWith('#1 ['), 'Outline lists turn numbers');
+  assert.equal(outline.split('\n').length, 60, 'One outline line per user prompt');
+  const smart = renderSessionMarkdown(big, { smartDefault: true });
+  assert.ok(smart.includes('## Outline') && smart.includes('Turns 101–120 of 120'), 'Long sessions default to outline + tail');
+  const stretch = renderSessionMarkdown(big, { from: 41, to: 42, smartDefault: true });
+  assert.ok(stretch.includes('#41 User') && stretch.includes('#42 Assistant') && !stretch.includes('#43 '), 'from/to returns exactly that stretch');
+  console.log('   ✔ Turn navigation works.');
+
+  console.log('15. Testing tool-output snippets are captured and redacted...');
+  const fakeClaude = path.join(tmpRoot, 'claude-projects-15');
+  const repo15 = 'C:\\Users\\x\\Projects\\snip';
+  const dir15 = path.join(fakeClaude, 'C--Users-x-Projects-snip');
+  fs.mkdirSync(dir15, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir15, 's15.jsonl'),
+    [
+      { sessionId: 's15', timestamp: '2026-11-01T10:00:00Z', type: 'user', message: { content: 'run the build' } },
+      { sessionId: 's15', timestamp: '2026-11-01T10:00:01Z', type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm run build' } }, { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: 'C:\\Users\\x\\Projects\\snip\\a.ts' } }] } },
+      { sessionId: 's15', timestamp: '2026-11-01T10:00:02Z', type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Build failed: 3 errors. API_KEY=supersecretvalue123' }, { type: 'tool_result', tool_use_id: 't2', content: 'export const fileContents = 1;' }] } },
+      { sessionId: 's15', timestamp: '2026-11-01T10:00:03Z', type: 'assistant', message: { content: [{ type: 'text', text: 'The build has 3 errors.' }] } },
+    ].map((e) => JSON.stringify(e)).join('\n'),
+    'utf8'
+  );
+  const s15 = collectClaudeCodeSessions(repo15, { branch: 'main' }, fakeClaude)[0];
+  const outputs = s15.turns.find((t) => t.role === 'assistant')?.toolOutputs ?? [];
+  assert.equal(outputs.length, 1, 'Only command output kept (file reads skipped)');
+  assert.ok(outputs[0].startsWith('Bash: Build failed: 3 errors.'), outputs[0]);
+  assert.ok(outputs[0].includes('[REDACTED]') && !outputs[0].includes('supersecretvalue123'), 'Secrets in output are redacted');
+  assert.ok(!outputs.join(' ').includes('fileContents'), 'File contents are not stored');
+  console.log('   ✔ Command output kept, file reads skipped, secrets redacted.');
+
+  console.log('16. Testing handoff notes...');
+  const now = new Date('2026-11-05T12:00:00Z');
+  const agySess = { ...makeSession('agy-1', 'Squirrel outline pass', 'Equalized outline widths to 2.8px.'), source: 'antigravity' as const, updatedAt: '2026-11-05T10:00:00Z' };
+  const claudeOld = { ...makeSession('claude-1', 'Earlier Claude work', 'done'), updatedAt: '2026-11-05T08:00:00Z' };
+  const note = buildHandoff([claudeOld, agySess], 'claude-code', { now });
+  assert.ok(note && note.includes('Antigravity') && note.includes('2 hours ago') && note.includes('lore show agy-1'), note ?? 'null');
+  assert.ok(note!.length < 1600, 'Handoff stays short');
+  assert.equal(buildHandoff([agySess, { ...claudeOld, updatedAt: '2026-11-05T11:00:00Z' }], 'claude-code', { now }), null, 'No handoff when the latest work is in the same tool');
+  assert.equal(buildHandoff([{ ...agySess, updatedAt: '2026-11-03T10:00:00Z' }], 'claude-code', { now }), null, 'No handoff for stale work');
+  console.log('   ✔ Handoff only fires for recent work in another tool.');
+
+  console.log('17. Testing search reports matching turn numbers...');
+  saveLocalSession(laptopRepo, longSession('turn-search', 30));
+  const marked = loadAllLocalSessions(laptopRepo).find((s) => s.id === 'turn-search')!;
+  marked.turns[22] = { ...marked.turns[22], text: 'We chose the zanzibar caching strategy here' };
+  saveLocalSession(laptopRepo, { ...marked, updatedAt: '2026-11-02T00:00:00Z' });
+  refreshWorkspaceContextFiles(laptopRepo);
+  const turnHit = searchLore(laptopRepo, 'zanzibar').find((h) => h.docId === 'turn-search');
+  assert.ok(turnHit && turnHit.turns && turnHit.turns[0] === 23, `Expected turn 23, got ${JSON.stringify(turnHit?.turns)}`);
+  console.log('   ✔ Search points at the matching turn.');
+
+  console.log('18. Testing setup helpers: handoff hook toggling and instruction blocks...');
+  const settings: Record<string, any> = { hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'echo mine' }] }] } };
+  applyHandoffHook(settings, 'C:\\npm\\cli.js', true);
+  applyHandoffHook(settings, 'C:\\npm\\cli.js', true);
+  const ours = settings.hooks.SessionStart.flatMap((g: any) => g.hooks).filter((h: any) => h.command.includes('handoff --hook'));
+  assert.equal(ours.length, 1, 'Hook added once');
+  assert.equal(applyHandoffHook(settings, 'C:\\new\\cli.js', undefined), true, 'Unspecified keeps it on');
+  assert.ok(JSON.stringify(settings).includes('C:/new/cli.js'), 'Path updated');
+  applyHandoffHook(settings, 'C:\\npm\\cli.js', false);
+  assert.ok(!JSON.stringify(settings).includes('handoff --hook'), 'Hook removed');
+  assert.ok(JSON.stringify(settings).includes('echo mine'), "User's own hooks untouched");
+  const md1 = upsertMarkedBlock('# Mine\n\nkeep me', CLAUDE_MD_BLOCK, '# Global');
+  const md2 = upsertMarkedBlock(md1, CLAUDE_MD_BLOCK, '# Global');
+  assert.equal(md1, md2, 'Re-running setup does not duplicate the block');
+  assert.ok(md2.includes('keep me'));
+  console.log('   ✔ Setup is idempotent and leaves user content alone.');
 }
 
 runTests().catch((err) => {

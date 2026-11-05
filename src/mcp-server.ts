@@ -21,6 +21,7 @@ import {
   searchLore,
 } from './context-injector.js';
 import type { TakeawayEntry } from './types.js';
+import { renderSessionMarkdown } from './session-view.js';
 
 const MCP_TOOLS = [
   {
@@ -77,7 +78,9 @@ const MCP_TOOLS = [
   {
     name: 'lore_get_session',
     description:
-      'Retrieve the stripped User/Assistant conversation turns of a specific past session by its ID (or 8-character ID prefix).',
+      'Retrieve the stripped User/Assistant turns of a past session by ID (or 8-character prefix). ' +
+      'Long sessions return an outline (each user prompt with its turn number) plus the last 20 turns by default; ' +
+      'decisions made mid-session are often not near the end, so use the outline and from/to to read the relevant stretch.',
     annotations: {
       title: 'Lore Get Session',
       readOnlyHint: true,
@@ -91,6 +94,22 @@ const MCP_TOOLS = [
         sessionId: {
           type: 'string',
           description: 'Full session ID or prefix (e.g. from lore_status or lore_search).',
+        },
+        outline: {
+          type: 'boolean',
+          description: 'Return only the outline: one line per user prompt with its turn number.',
+        },
+        last: {
+          type: 'number',
+          description: 'Return only the last N turns.',
+        },
+        from: {
+          type: 'number',
+          description: 'First turn number to return (1-based, inclusive).',
+        },
+        to: {
+          type: 'number',
+          description: 'Last turn number to return (1-based, inclusive).',
         },
         repoPath: {
           type: 'string',
@@ -251,7 +270,10 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
         (h, i) =>
           `${i + 1}. [${h.docType.toUpperCase()}] **${h.title}** (id: \`${h.docId}\` · ${h.updatedAt.slice(0, 16)})\n` +
           (h.files ? `   Files: ${h.files}\n` : '') +
-          `   Snippet: ${h.snippet}`
+          `   Snippet: ${h.snippet.replace(/\s+/g, ' ').trim()}` +
+          (h.turns && h.turns.length > 0
+            ? `\n   Matching turns: #${h.turns.join(', #')} (read with lore_get_session from/to)`
+            : '')
       )
       .join('\n\n');
   }
@@ -268,29 +290,14 @@ async function handleToolCall(name: string, args: Record<string, any>): Promise<
         sessions.map((s) => `- \`${s.id.slice(0, 8)}\`: ${s.title} (${s.updatedAt.slice(0, 16)})`).join('\n');
     }
 
-    const header = [
-      `# Session: ${match.title}`,
-      `- **ID**: \`${match.id}\``,
-      `- **Source**: ${match.source} · **Device**: ${match.deviceHostname || 'unknown'} · **Branch**: ${match.branch || 'main'}`,
-      `- **Updated**: ${match.updatedAt}`,
-      `- **Files Touched**: ${match.filesTouched.join(', ') || 'none'}`,
-      `- **Compression**: ${(match.originalBytes / 1024).toFixed(1)} KB raw → ${(match.compressedBytes / 1024).toFixed(1)} KB stripped`,
-      '',
-      '## Conversation Transcript',
-      '',
-    ].join('\n');
-
-    const body = match.turns
-      .map((t) => {
-        const toolLine =
-          t.toolsUsed && t.toolsUsed.length > 0
-            ? `\n  _[Tools: ${t.toolsUsed.slice(0, 8).join('; ')}]_\n`
-            : '';
-        return `### ${t.role === 'user' ? 'User' : 'Assistant'} (${t.timestamp.slice(11, 19)})${toolLine}\n${t.text}`;
-      })
-      .join('\n\n---\n\n');
-
-    return `${header}${body}`;
+    const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+    return renderSessionMarkdown(match, {
+      outline: args.outline === true,
+      last: num(args.last),
+      from: num(args.from),
+      to: num(args.to),
+      smartDefault: true,
+    });
   }
 
   if (name === 'lore_save_takeaway') {

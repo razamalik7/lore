@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 
 export interface StableCliPath {
   path: string;
@@ -10,10 +10,11 @@ export interface StableCliPath {
 
 function globalInstallCliPath(): string | null {
   try {
-    const root = execFileSync('npm', ['root', '-g'], {
+    // A fixed command string (no user input) through the shell, so npm.cmd resolves on Windows
+    // without Node's warning about passing argument arrays to a shell.
+    const root = execSync('npm root -g', {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-      shell: process.platform === 'win32',
       timeout: 15000,
     }).trim();
     const candidate = path.join(root, 'git-lore-cli', 'dist', 'cli.js');

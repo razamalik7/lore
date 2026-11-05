@@ -1,19 +1,61 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {
+  AGENTS_MD_BLOCK,
+  ANTIGRAVITY_SKILL_MD,
+  CLAUDE_MD_BLOCK,
+  upsertMarkedBlock,
+} from './agent-instructions.js';
 
 /**
  * Configure global Antigravity (`~/.gemini/config/`) and Claude Code (`~/.claude.json` + `~/.claude/CLAUDE.md`)
  * so agents across all repositories automatically have `lore` MCP tools and instructions
  * without the user ever needing to explain `lore` in chat.
  */
-export function installGlobalAgentIntegrations(cliEntryPath: string): {
+const HANDOFF_HOOK_TAG = ' handoff --hook';
+
+/**
+ * Add, update, or remove lore's Claude Code SessionStart hook (`lore handoff --hook`).
+ * `want` true adds it, false removes it, undefined keeps whatever is there (re-pointing its path).
+ * Returns whether the hook is installed afterwards.
+ */
+export function applyHandoffHook(settings: Record<string, any>, cliPath: string, want: boolean | undefined): boolean {
+  if (!settings.hooks || typeof settings.hooks !== 'object') settings.hooks = {};
+  const groups: any[] = Array.isArray(settings.hooks.SessionStart) ? settings.hooks.SessionStart : [];
+  const isOurs = (h: any) => typeof h?.command === 'string' && h.command.includes(HANDOFF_HOOK_TAG);
+  const hadIt = groups.some((g) => Array.isArray(g?.hooks) && g.hooks.some(isOurs));
+  const keep = want ?? hadIt;
+
+  const cleaned = groups
+    .map((g) => (Array.isArray(g?.hooks) ? { ...g, hooks: g.hooks.filter((h: any) => !isOurs(h)) } : g))
+    .filter((g) => !Array.isArray(g?.hooks) || g.hooks.length > 0);
+  if (keep) {
+    cleaned.push({
+      matcher: 'startup|resume|clear',
+      hooks: [{ type: 'command', command: `node "${cliPath.replace(/\\/g, '/')}"${HANDOFF_HOOK_TAG}`, timeout: 20 }],
+    });
+  }
+  if (cleaned.length > 0) settings.hooks.SessionStart = cleaned;
+  else delete settings.hooks.SessionStart;
+  if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+  return keep;
+}
+
+export function installGlobalAgentIntegrations(
+  cliEntryPath: string,
+  opts: { handoff?: boolean } = {}
+): {
   antigravityMcpPath: string;
   antigravitySkillPath: string;
   claudeConfigUpdated: boolean;
+  handoffHookInstalled: boolean;
+  codexInstructionsPath?: string;
 } {
   const home = os.homedir();
   const normalizedCli = path.resolve(cliEntryPath);
+  let handoffHookInstalled = false;
+  let codexInstructionsPath: string | undefined;
 
   // 1. Antigravity Global MCP Config (~/.gemini/config/mcp_config.json)
   const agyConfigDir = path.join(home, '.gemini', 'config');
@@ -46,32 +88,7 @@ export function installGlobalAgentIntegrations(cliEntryPath: string): {
   const skillDir = path.join(agyConfigDir, 'skills', 'lore');
   fs.mkdirSync(skillDir, { recursive: true });
   const skillPath = path.join(skillDir, 'SKILL.md');
-  const skillContent = `---
-name: lore
-description: >-
-  Automatic cross-device and team AI context memory synced via encrypted Git refs (refs/ai/lore).
-  Use automatically whenever the user references past chats, work from another device, architectural decisions,
-  or when completing significant milestones in a Git repository.
----
-
-# lore — Git-Native Encrypted AI Context & Memory
-
-\`lore\` automatically syncs compressed AI chat transcripts, Claude Code project memories (\`memory/*.md\`), and architectural takeaways across devices and approved repo contributors via the hidden Git ref \`refs/ai/lore\`.
-
-## How to Use Automatically (Zero Permission Prompts)
-
-1. **Always-On Digest**:
-   In initialized repos, \`.agents/rules/lore-context.md\` is automatically generated and git-excluded. Read it with \`view_file\` for the latest architectural takeaways and recaps of recent coding sessions across devices.
-2. **CLI Commands (Preferred in Antigravity for Zero Permission Prompts)**:
-   Run \`lore\` directly via \`run_command\` so it executes seamlessly without MCP confirmation dialogs:
-   - \`lore status\`: Check synced sessions, compression stats, takeaways, and authorized SSH recipients.
-   - \`lore search "<query>"\`: Full-text BM25 search across all past sessions & takeaways (<15ms, 0 token cost).
-   - \`lore show <session-id>\`: View the stripped User/Assistant conversation turns of a specific session.
-   - \`lore note "<text>" --cat <decision|architecture|gotcha|wip|convention>\`: Save a takeaway to the Living Digest.
-   - \`lore sync\`: Collect local sessions + Claude \`memory/*.md\`, encrypt, merge with remote \`refs/ai/lore\`, and push.
-3. **MCP Tools (Alternative when CLI is unavailable)**:
-   \`lore_status\`, \`lore_search\`, \`lore_get_session\`, \`lore_save_takeaway\`, \`lore_sync\`.
-`;
+  const skillContent = ANTIGRAVITY_SKILL_MD;
   fs.writeFileSync(skillPath, skillContent, 'utf8');
 
   // 3. Claude Code Global Config (~/.claude.json + ~/.claude/CLAUDE.md)
@@ -102,25 +119,12 @@ description: >-
   try {
     fs.mkdirSync(claudeDir, { recursive: true });
     const claudeMdPath = path.join(claudeDir, 'CLAUDE.md');
-    const claudeLoreBlock = `<!-- lore-global-instructions -->
-## \`lore\` — Cross-Device & Multi-Agent Git Context Memory
-- In repositories using \`lore\`, read \`.agents/rules/lore-context.md\` (or run \`lore status\` / call MCP tool \`lore_status\`) to see shared architectural takeaways and recent sessions from Antigravity, Claude Code, Cursor, and Codex across devices.
-- Search past sessions & takeaways with \`lore search "<query>"\` (or MCP \`lore_search\`), view full session transcripts with \`lore show <id>\` (or MCP \`lore_get_session\`), record key decisions/gotchas with \`lore note "<text>" --cat <decision|architecture|gotcha|wip|convention>\`, and sync via \`lore sync\`.
-<!-- /lore-global-instructions -->`;
-    if (fs.existsSync(claudeMdPath)) {
-      const existingMd = fs.readFileSync(claudeMdPath, 'utf8');
-      if (existingMd.includes('<!-- lore-global-instructions -->')) {
-        const updatedMd = existingMd.replace(
-          /<!-- lore-global-instructions -->[\s\S]*?<!-- \/lore-global-instructions -->/,
-          claudeLoreBlock
-        );
-        fs.writeFileSync(claudeMdPath, updatedMd, 'utf8');
-      } else {
-        fs.writeFileSync(claudeMdPath, `${existingMd.trimEnd()}\n\n${claudeLoreBlock}\n`, 'utf8');
-      }
-    } else {
-      fs.writeFileSync(claudeMdPath, `# Global Claude Code Instructions\n\n${claudeLoreBlock}\n`, 'utf8');
-    }
+    const existingMd = fs.existsSync(claudeMdPath) ? fs.readFileSync(claudeMdPath, 'utf8') : null;
+    fs.writeFileSync(
+      claudeMdPath,
+      upsertMarkedBlock(existingMd, CLAUDE_MD_BLOCK, '# Global Claude Code Instructions'),
+      'utf8'
+    );
 
     // Also auto-allow lore CLI and MCP tools in ~/.claude/settings.json so Claude never prompts for permission
     const claudeSettingsPath = path.join(claudeDir, 'settings.json');
@@ -146,6 +150,7 @@ description: >-
         claudeSettings.permissions.allow.push(rule);
       }
     }
+    handoffHookInstalled = applyHandoffHook(claudeSettings, normalizedCli, opts.handoff);
     fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2), 'utf8');
   } catch {
     // Ignore if ~/.claude/CLAUDE.md is not writable
@@ -226,9 +231,24 @@ description: >-
     }
   }
 
+  // 6. Codex global instructions (~/.codex/AGENTS.md) if Codex is installed
+  const codexDir = path.join(home, '.codex');
+  if (fs.existsSync(codexDir)) {
+    try {
+      const agentsPath = path.join(codexDir, 'AGENTS.md');
+      const existing = fs.existsSync(agentsPath) ? fs.readFileSync(agentsPath, 'utf8') : null;
+      fs.writeFileSync(agentsPath, upsertMarkedBlock(existing, AGENTS_MD_BLOCK, '# Global Codex Instructions'), 'utf8');
+      codexInstructionsPath = agentsPath;
+    } catch {
+      // Ignore
+    }
+  }
+
   return {
     antigravityMcpPath: agyMcpPath,
     antigravitySkillPath: skillPath,
     claudeConfigUpdated,
+    handoffHookInstalled,
+    codexInstructionsPath,
   };
 }

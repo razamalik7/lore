@@ -21,8 +21,19 @@ const SECRET_PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
     regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
     replacement: '[REDACTED_PRIVATE_KEY]',
   },
+  // Private key blocks cut off before their END line (e.g. in clipped command output)
+  { regex: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*$/g, replacement: '[REDACTED_PRIVATE_KEY]' },
   // Authorization Bearer tokens
   { regex: /(Bearer\s+)[A-Za-z0-9._~+/=-]{24,512}/gi, replacement: '$1[REDACTED_BEARER_TOKEN]' },
+  // JSON Web Tokens
+  { regex: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, replacement: '[REDACTED_JWT]' },
+  // Passwords embedded in URLs (postgres://user:pass@host)
+  { regex: /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:)[^\s@/]+@/gi, replacement: '$1[REDACTED]@' },
+  // SECRET=..., API_KEY: ..., DB_PASSWORD="..." (env dumps, config output)
+  {
+    regex: /\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)[A-Za-z0-9_]*\s*[=:]\s*["']?)[^\s"']{8,}/gi,
+    replacement: '$1[REDACTED]',
+  },
 ];
 
 export function redactSecrets(text: string): string {

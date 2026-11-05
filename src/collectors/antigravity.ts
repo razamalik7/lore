@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import type { CompactTurn, SessionRecord } from '../types.js';
+import { redactSecrets } from '../redactor.js';
 
 export function normalizeFsPath(p: string): string {
   try {
@@ -70,6 +71,33 @@ export function isSameOrSubPath(targetPath: string, repoRoot: string): boolean {
   const normTarget = normalizeFsPath(targetPath);
   const normRepo = normalizeFsPath(repoRoot);
   return normTarget === normRepo || normTarget.startsWith(`${normRepo}/`);
+}
+
+export const MAX_TOOL_OUTPUTS_PER_TURN = 6;
+export const MAX_TOOL_OUTPUT_CHARS = 240;
+
+/** Redact first, then clip: clipping first could cut a secret's end marker and hide it from the redactor. */
+export function clipOutput(text: string): string {
+  const flat = redactSecrets(text).replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_TOOL_OUTPUT_CHARS ? `${flat.slice(0, MAX_TOOL_OUTPUT_CHARS - 1)}…` : flat;
+}
+
+/**
+ * Evidence from an Antigravity tool-result step: command exit codes + output, and tool errors.
+ * File views are skipped (their content is the file, not a result).
+ */
+function agyToolOutputSnippet(step: any): string | null {
+  if (step?.type !== 'GENERIC') return null;
+  if (step.status === 'ERROR' && typeof step.error === 'string') {
+    return clipOutput(`error: ${step.error.replace(/^.*?(invalid tool call error|error)\s*/i, '')}`);
+  }
+  if (typeof step.content !== 'string') return null;
+  const m = step.content.match(/The command exited with code (-?\d+)\.\s*(?:Output:\s*)?([\s\S]*)$/);
+  if (m) {
+    const out = m[2].trim();
+    return clipOutput(`exit ${m[1]}${out ? `: ${out}` : ''}`);
+  }
+  return null;
 }
 
 /** Path-valued tool arguments Antigravity uses for file reads/edits and command working folders. */
@@ -271,6 +299,7 @@ export function collectAntigravitySessions(
     let updatedAt = summaryMeta.updatedAt || fs.statSync(transcriptPath).mtime.toISOString();
     let pendingTools: string[] = [];
     let pendingFiles: string[] = [];
+    let pendingOutputs: string[] = [];
 
     for (const line of lines) {
       let step: any;
@@ -279,6 +308,9 @@ export function collectAntigravitySessions(
       } catch {
         continue;
       }
+
+      const snippet = agyToolOutputSnippet(step);
+      if (snippet && pendingOutputs.length < MAX_TOOL_OUTPUTS_PER_TURN) pendingOutputs.push(snippet);
 
       if (!createdAt && step.created_at) {
         createdAt = step.created_at;
@@ -324,9 +356,11 @@ export function collectAntigravitySessions(
             text,
             toolsUsed: pendingTools.length > 0 ? Array.from(new Set(pendingTools)) : undefined,
             filesTouched: pendingFiles.length > 0 ? Array.from(new Set(pendingFiles)) : undefined,
+            toolOutputs: pendingOutputs.length > 0 ? pendingOutputs : undefined,
           });
           pendingTools = [];
           pendingFiles = [];
+          pendingOutputs = [];
         }
       }
     }

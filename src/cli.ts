@@ -42,6 +42,8 @@ import {
   refreshHooksIfStale,
 } from './hooks.js';
 import { resolveStableCliPath } from './install-path.js';
+import { renderOutline, resolveTurnRange } from './session-view.js';
+import { runHandoff } from './handoff.js';
 import { installGlobalAgentIntegrations } from './global-setup.js';
 import { startMcpServer } from './mcp-server.js';
 import type { TakeawayEntry } from './types.js';
@@ -111,7 +113,9 @@ function printHelp(): void {
 lore (git-lore) — Git-Native Encrypted AI Context & Memory
 
 Usage:
-  lore setup                         One-time global install for Antigravity & Claude Code (MCP + Skill)
+  lore setup [--handoff|--no-handoff] One-time global install for Antigravity, Claude Code, Cursor, Codex
+                                     (--handoff: Claude Code sessions start with recent work from other tools)
+  lore handoff                       Show recent work from another tool in this repo (what --handoff injects)
   lore init                          Initialize lore in current Git repo (hooks + SSH encryption + initial sync)
   lore status                        Show synced sessions, compression stats, takeaways, and authorized keys
   lore sync                          Collect local chats, encrypt, merge with remote refs/ai/lore, and push
@@ -121,6 +125,8 @@ Usage:
   lore note <text> [--cat <type>]    Save an architectural decision, gotcha, or WIP note to the Living Digest
   lore search <query>                Full-text BM25 search across all past sessions & takeaways
   lore show <session-id>             View the stripped conversation turns of a session in your terminal
+       [--outline]                   One line per user prompt, with turn numbers
+       [--last N | --from A --to B]  Only a stretch of turns
   lore forget <id> [<id>...]         Delete sessions/takeaways by id or prefix (on every device, after sync)
   lore forget --check                List sessions from this device that no longer belong to this repo
   lore compact                       Rewrite refs/ai/lore without history (purges forgotten/revoked data)
@@ -146,7 +152,8 @@ async function main(): Promise<void> {
     syncGithubAccountIdentity(process.cwd());
     const id = ensureLocalIdentity(process.cwd());
     const stable = resolveStableCliPath(__filename, args.includes('--use-this-copy'));
-    const res = installGlobalAgentIntegrations(stable.path);
+    const handoff = args.includes('--handoff') ? true : args.includes('--no-handoff') ? false : undefined;
+    const res = installGlobalAgentIntegrations(stable.path, { handoff });
     console.log('✔ lore global setup complete!');
     console.log(`  • Local SSH Identity : ${id.label} (${id.fingerprint})`);
     console.log(`  • Key Path           : ${id.privPath}`);
@@ -157,7 +164,43 @@ async function main(): Promise<void> {
     if (res.claudeConfigUpdated) {
       console.log(`  • Claude Code MCP    : ~/.claude.json (updated)`);
     }
+    if (res.codexInstructionsPath) {
+      console.log(`  • Codex Instructions : ${res.codexInstructionsPath}`);
+    }
+    console.log(
+      `  • Handoff Hook       : ${res.handoffHookInstalled ? 'on' : 'off'} ` +
+        `(Claude Code sessions ${res.handoffHookInstalled ? 'start with' : 'can start with'} a note about recent work in other tools; ` +
+        `${res.handoffHookInstalled ? 'turn off with lore setup --no-handoff' : 'turn on with lore setup --handoff'})`
+    );
     console.log('\nAgents in all workspaces now automatically know how to use lore.');
+    return;
+  }
+
+  if (cmd === 'handoff') {
+    const hook = args.includes('--hook');
+    // readFileSync(0) is unreliable on Windows pipes, so read stdin as a stream with a short timeout
+    const stdinText =
+      hook && !process.stdin.isTTY
+        ? await new Promise<string>((resolve) => {
+            let buf = '';
+            const done = () => resolve(buf);
+            const timer = setTimeout(done, 3000);
+            process.stdin.setEncoding('utf8');
+            process.stdin.on('data', (d) => (buf += d));
+            process.stdin.on('end', () => {
+              clearTimeout(timer);
+              done();
+            });
+            process.stdin.on('error', () => {
+              clearTimeout(timer);
+              done();
+            });
+          })
+        : undefined;
+    process.stdin.pause();
+    const note = runHandoff((dir) => findGitRoot(dir), { hook, stdinText });
+    if (note) console.log(note);
+    else if (!hook) console.log('No recent work from another tool to hand off.');
     return;
   }
 
@@ -404,17 +447,33 @@ async function main(): Promise<void> {
     for (const h of hits) {
       console.log(`• [${h.docType.toUpperCase()}] ${h.title} (id: ${h.docId.slice(0, 8)} · ${h.updatedAt.slice(0, 16)})`);
       if (h.files) console.log(`  Files  : ${h.files}`);
-      console.log(`  Snippet: ${h.snippet}\n`);
+      console.log(`  Snippet: ${h.snippet.replace(/\s+/g, ' ').trim()}`);
+      if (h.turns && h.turns.length > 0) {
+        const first = Math.max(1, h.turns[0] - 3);
+        console.log(`  Turns  : #${h.turns.join(', #')}  →  lore show ${h.docId.slice(0, 8)} --from ${first} --to ${h.turns[0] + 6}`);
+      }
+      console.log('');
     }
     return;
   }
 
   if (cmd === 'show') {
-    const targetId = args[1]?.trim().toLowerCase();
+    const targetId = args.slice(1).find((a, i, arr) => !a.startsWith('--') && !(i > 0 && /^--(last|from|to)$/.test(arr[i - 1])))?.trim().toLowerCase();
     if (!targetId) {
-      console.error('Usage: lore show <session-id-or-prefix>');
+      console.error('Usage: lore show <session-id-or-prefix> [--outline | --last N | --from A --to B]');
       process.exit(1);
     }
+    const numFlag = (name: string): number | undefined => {
+      const i = args.indexOf(name);
+      if (i === -1) return undefined;
+      const n = Number(args[i + 1]);
+      if (!Number.isFinite(n) || n <= 0) {
+        console.error(`✖ ${name} needs a positive turn number`);
+        process.exit(1);
+      }
+      return n;
+    };
+    const rangeOpts = { last: numFlag('--last'), from: numFlag('--from'), to: numFlag('--to') };
     const repoRoot = requireRepoRoot();
     collectAndCacheLocalSessions(repoRoot);
     const sessions = loadAllLocalSessions(repoRoot);
@@ -434,14 +493,26 @@ async function main(): Promise<void> {
       console.log(`Files   : ${match.filesTouched.join(', ')}`);
     }
     console.log(`================================================================================\n`);
-    for (const t of match.turns) {
+    if (args.includes('--outline')) {
+      console.log(renderOutline(match));
+      console.log(`\nRead a stretch: lore show ${match.id.slice(0, 8)} --from <turn> --to <turn>`);
+      return;
+    }
+    const range = resolveTurnRange(match.turns.length, rangeOpts);
+    if (range.from !== 1 || range.to !== match.turns.length) {
+      console.log(`(turns ${range.from}–${range.to} of ${match.turns.length})\n`);
+    }
+    match.turns.slice(range.from - 1, range.to).forEach((t, i) => {
       const roleHeader = t.role === 'user' ? '▶ USER' : '◀ AGENT';
-      console.log(`${roleHeader} (${t.timestamp.slice(0, 19).replace('T', ' ')})`);
+      console.log(`#${range.from + i} ${roleHeader} (${t.timestamp.slice(0, 19).replace('T', ' ')})`);
       if (t.toolsUsed && t.toolsUsed.length > 0) {
         console.log(`  [Tools: ${t.toolsUsed.slice(0, 6).join(' | ')}]`);
       }
+      if (t.toolOutputs && t.toolOutputs.length > 0) {
+        for (const o of t.toolOutputs) console.log(`  [Output: ${o}]`);
+      }
       console.log(`${t.text}\n`);
-    }
+    });
     return;
   }
 

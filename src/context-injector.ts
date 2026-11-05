@@ -33,6 +33,13 @@ export function rebuildSearchIndex(repoRoot: string): void {
 
   const db = new DatabaseSync(paths.searchDbPath);
   db.exec(`
+    DROP TABLE IF EXISTS lore_turns;
+    CREATE VIRTUAL TABLE lore_turns USING fts5(
+      session_id UNINDEXED,
+      turn_no UNINDEXED,
+      body,
+      tokenize = 'porter unicode61'
+    );
     DROP TABLE IF EXISTS lore_fts;
     CREATE VIRTUAL TABLE lore_fts USING fts5(
       doc_type UNINDEXED,
@@ -70,9 +77,20 @@ export function rebuildSearchIndex(repoRoot: string): void {
     );
   }
 
+  const insertTurn = db.prepare(`INSERT INTO lore_turns (session_id, turn_no, body) VALUES (?, ?, ?)`);
+  for (const s of sessions) {
+    s.turns.forEach((turn, i) => {
+      const extra = [...(turn.toolsUsed ?? []), ...(turn.toolOutputs ?? [])].join('\n');
+      insertTurn.run(s.id, i + 1, extra ? `${turn.text}\n${extra}` : turn.text);
+    });
+  }
+
   for (const s of sessions) {
     const bodyText = s.turns
-      .map((turn) => `${turn.role.toUpperCase()}: ${turn.text}`)
+      .map((turn) => {
+        const outputs = turn.toolOutputs && turn.toolOutputs.length > 0 ? `\n${turn.toolOutputs.join('\n')}` : '';
+        return `${turn.role.toUpperCase()}: ${turn.text}${outputs}`;
+      })
       .join('\n\n');
     insert.run(
       'session',
@@ -98,6 +116,8 @@ export interface SearchHit {
   updatedAt: string;
   files: string;
   snippet: string;
+  /** For session hits: the best-matching turn numbers (1-based), most relevant first. */
+  turns?: number[];
 }
 
 /**
@@ -138,6 +158,20 @@ export function searchLore(repoRoot: string, query: string, limit = 8): SearchHi
          LIMIT ?`
       )
       .all(sanitized, limit) as unknown as SearchHit[];
+    try {
+      const turnQuery = db.prepare(
+        `SELECT turn_no AS turnNo FROM lore_turns
+         WHERE lore_turns MATCH ? AND session_id = ?
+         ORDER BY bm25(lore_turns) LIMIT 5`
+      );
+      for (const r of rows) {
+        if (r.docType !== 'session') continue;
+        const turnRows = turnQuery.all(sanitized, r.docId) as Array<{ turnNo: number }>;
+        if (turnRows.length > 0) r.turns = turnRows.map((t) => Number(t.turnNo));
+      }
+    } catch {
+      // Older index without the turns table: leave turns unset
+    }
     db.close();
     return rows;
   } catch {
@@ -161,7 +195,7 @@ export function renderDigestMarkdown(
     '# Project Lore (`lore` Shared AI Context)',
     '',
     '> Auto-synced across devices & approved contributors via encrypted `refs/ai/lore`.',
-    '> Need full verbatim dialogue or older chats? Run `lore search "<query>"` / `lore show <id>` or call MCP tools `lore_search` / `lore_get_session`.',
+    '> Continuing work from another tool? Run `lore show <id> --outline`, then read the relevant stretch with `--from/--to` (or MCP `lore_get_session`). Search with `lore search "<query>"`.',
     '> Finished a milestone or architectural decision? Run `lore note "<text>" --cat <type>` or call `lore_save_takeaway`.',
     '',
   ];
