@@ -43,6 +43,7 @@ import { collectAntigravitySessions, matchesRepoSlug } from '../src/collectors/a
 import type { SessionRecord } from '../src/types.js';
 import { renderOutline, renderSessionMarkdown, resolveTurnRange } from '../src/session-view.js';
 import { buildHandoff } from '../src/handoff.js';
+import { redactSecrets } from '../src/redactor.js';
 import { applyHandoffHook } from '../src/global-setup.js';
 import { CLAUDE_MD_BLOCK, upsertMarkedBlock } from '../src/agent-instructions.js';
 
@@ -691,6 +692,45 @@ async function runV02Tests(ctx: { tmpRoot: string; remoteBare: string; desktopRe
   assert.equal(md1, md2, 'Re-running setup does not duplicate the block');
   assert.ok(md2.includes('keep me'));
   console.log('   ✔ Setup is idempotent and leaves user content alone.');
+
+  console.log('19. Testing redaction of keys pasted in prose and new key formats...');
+  // Fake keys built at runtime so this file never contains anything key-shaped
+  const fakeAQ = `AQ.${'Ab3_x9Kq'.repeat(6)}z`;
+  const fakeOpaque = `${'Zx81QwPl'.repeat(4)}`;
+  const leaks = [
+    `ok yeah so now we have access to nano banana programitically here is a key: ${fakeAQ} set up to billing`,
+    `my api key is ${fakeOpaque}`,
+    `token: "${fakeOpaque}"`,
+    `export GEMINI_API_KEY=${fakeOpaque}`,
+    `password - ${fakeOpaque}`,
+  ];
+  for (const l of leaks) {
+    const red = redactSecrets(l);
+    assert.ok(!red.includes(fakeAQ) && !red.includes(fakeOpaque), `Leaked through redaction: ${red}`);
+  }
+  assert.ok(redactSecrets(leaks[0]).includes('set up to billing'), 'Surrounding text is kept');
+  const keep = [
+    'tokens: 247,000,000 used so far',
+    'api_key="YOUR_API_KEY_HERE"',
+    'the key insight is that chunking keeps blobs stable',
+    'key: src/collectors/antigravity.ts',
+    'Authorized Keys    : 3',
+  ];
+  for (const k of keep) assert.equal(redactSecrets(k), k, `False positive: ${k}`);
+
+  // Data stored before a rule existed is cleaned on the next sync, including tool summaries
+  const leakyRepo = laptopRepo;
+  const paths19 = path.join(leakyRepo, '.git', 'lore', 'sessions');
+  const leaky = makeSession('leaky-session', 'Paste of a key', `here is a key: ${fakeAQ}`);
+  leaky.turns[1].toolsUsed = [`run_command: setx GEMINI_API_KEY ${fakeOpaque}`];
+  fs.writeFileSync(path.join(paths19, 'leaky-session.json'), JSON.stringify(leaky, null, 2), 'utf8'); // bypasses saveLocalSession
+  assert.equal(pushLoreToRemote(leakyRepo, 'origin').pushed, true);
+  const cached = fs.readFileSync(path.join(paths19, 'leaky-session.json'), 'utf8');
+  assert.ok(!cached.includes(fakeAQ) && !cached.includes(fakeOpaque), 'Local cache is re-scrubbed before commit');
+  const pushedMeta = runGit(remoteBare, ['show', `${LORE_REF}:s2/leaky-session/c0000.enc`]);
+  const decrypted = decryptWithLocalIdentity(JSON.parse(pushedMeta));
+  assert.ok(!decrypted.includes(fakeAQ) && !decrypted.includes(fakeOpaque), 'Pushed data contains no key');
+  console.log('   ✔ Prose-pasted and new-format keys are redacted, old data is re-scrubbed, false alarms are left alone.');
 }
 
 runTests().catch((err) => {

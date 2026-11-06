@@ -315,21 +315,52 @@ export function saveLocalSession(repoRoot: string, session: SessionRecord): bool
       existing = null;
     }
   }
-  const scrubbed: SessionRecord = {
+  const scrubbed = scrubSession({
     ...session,
     branch: existing?.branch ?? session.branch,
     headCommit: existing?.headCommit ?? session.headCommit,
+  });
+  writeFileIfChanged(filePath, JSON.stringify(scrubbed, null, 2));
+  return true;
+}
+
+/** Redact secrets from every free-text field of a session (text, titles, tool summaries, tool output). */
+export function scrubSession(session: SessionRecord): SessionRecord {
+  const scrubbed: SessionRecord = {
+    ...session,
     title: redactSecrets(session.title),
     recap: redactSecrets(session.recap),
     turns: session.turns.map((t) => ({
       ...t,
       text: redactSecrets(t.text),
+      ...(t.toolsUsed ? { toolsUsed: t.toolsUsed.map((o) => redactSecrets(o)) } : {}),
       ...(t.toolOutputs ? { toolOutputs: t.toolOutputs.map((o) => redactSecrets(o)) } : {}),
     })),
   };
   scrubbed.compressedBytes = Buffer.byteLength(JSON.stringify({ ...scrubbed, compressedBytes: 0 }), 'utf8');
-  writeFileIfChanged(filePath, JSON.stringify(scrubbed, null, 2));
-  return true;
+  return scrubbed;
+}
+
+/**
+ * Re-apply the current redaction rules to everything already in the local cache.
+ * Runs before every commit, so when a rule is added (e.g. a new key format), data stored
+ * earlier, including sessions imported from other devices, is cleaned on the next sync.
+ */
+export function rescrubLocalCache(repoRoot: string): number {
+  const paths = ensureLocalLoreDirs(repoRoot);
+  let changed = 0;
+  for (const s of loadAllLocalSessions(repoRoot)) {
+    const clean = scrubSession(s);
+    const filePath = path.join(paths.sessionsDir, `${safeSessionFileId(s.id)}.json`);
+    if (writeFileIfChanged(filePath, JSON.stringify(clean, null, 2))) changed++;
+  }
+  const takeaways = loadTakeaways(repoRoot);
+  const cleanTakeaways = takeaways.map((t) => ({ ...t, content: redactSecrets(t.content) }));
+  if (JSON.stringify(cleanTakeaways) !== JSON.stringify(takeaways)) {
+    writeFileIfChanged(paths.takeawaysPath, JSON.stringify(cleanTakeaways, null, 2));
+    changed++;
+  }
+  return changed;
 }
 
 /**
@@ -705,6 +736,8 @@ export function commitToGitRef(
 } {
   const paths = ensureLocalLoreDirs(repoRoot);
   const manifest = loadManifest(repoRoot);
+  // Nothing leaves this machine without passing the current redaction rules
+  rescrubLocalCache(repoRoot);
   const takeaways = loadTakeaways(repoRoot);
   const sessions = loadAllLocalSessions(repoRoot);
   const tombstones = loadTombstones(repoRoot);
